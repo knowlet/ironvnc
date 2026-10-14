@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def command(*args):
-    return subprocess.check_output(args, cwd=ROOT, text=True).strip()
+    return subprocess.check_output(args, cwd=ROOT, encoding="utf-8").strip()
 
 
 def sha256(path):
@@ -214,7 +214,7 @@ def main():
         cwd=ROOT,
         check=True,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
         timeout=30,
     )
     if "--host" not in smoke.stdout or "Usage:" not in smoke.stdout:

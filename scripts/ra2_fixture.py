@@ -336,7 +336,7 @@ def run_case(args, private_key, security, subtype, username="alice", password="s
                                  username, password, failure, args.random_bytes_256)
             command = [args.binary, "--test", "-H127.0.0.1", "--port",
                        str(listener.getsockname()[1]), f"-U{username}", f"-P{password}"]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=TIMEOUT + 5)
+            result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=TIMEOUT + 5)
             output = result.stdout + result.stderr
             try:
                 server_result = future.result(timeout=TIMEOUT + 1)

@@ -117,7 +117,7 @@ def run_case(binary, label, banner=b"RFB 003.008\n", auth=1, encoding=0, failure
                        str(listener.getsockname()[1])]
             if auth == 2:
                 command += ["--password", "password"]
-            result = subprocess.run(command, capture_output=True, text=True, timeout=25)
+            result = subprocess.run(command, capture_output=True, encoding="utf-8", timeout=25)
             future.result(timeout=20)
         output = result.stdout + result.stderr
         if failure:
