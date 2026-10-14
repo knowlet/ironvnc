@@ -278,7 +278,9 @@ def main():
 
         if "windows" in args.target:
             archive = output / f"{package_name}.zip"
-            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as target:
+            # Published crate files may have reproducible epoch mtimes. ZIP's
+            # DOS timestamp starts in 1980; clamp dates while preserving bytes.
+            with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED, strict_timestamps=False) as target:
                 for path in sorted(package.rglob("*")):
                     if path.is_file():
                         target.write(path, path.relative_to(package.parent).as_posix())
