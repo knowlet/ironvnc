@@ -20,7 +20,8 @@ jobs:
     timeout-minutes: 60
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # Each target has its own hosted VM; local builds remain capped at two jobs.
+      max-parallel: 6
       matrix:
         include:
           - runner: ubuntu-24.04
