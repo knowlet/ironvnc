@@ -1,4 +1,4 @@
-use crate::connection::{VncCommand, VncEvent};
+use crate::connection::{Credentials, VncCommand, VncEvent};
 use crate::protocol::{ra2, AsyncRw};
 use anyhow::{bail, Result};
 use cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
@@ -20,13 +20,13 @@ pub const SECURITY_RA2NE_256: u8 = 130;
 /// raw TCP stream (buffered) for None/VncAuth/RA2ne, or an AES-EAX encrypted
 /// channel for RA2/RA2_256 (where the whole session is encrypted).
 ///
-/// If the server requires auth and no password was supplied, we send
-/// `VncEvent::NeedPassword` and block-wait on `cmd_rx` for a
-/// `VncCommand::ProvidePassword`.  This is safe because the VNC background
-/// thread is the only task on its single-threaded tokio runtime, and blocking
-/// it while waiting for user input is harmless.
+/// Missing credentials are requested through the event/command channels.
+/// RA2 requests them only after its encrypted subtype identifies which fields
+/// are needed. Blocking for user input is safe on the VNC background thread's
+/// single-threaded tokio runtime.
 pub async fn negotiate(
     mut stream: TcpStream,
+    username: Option<&str>,
     password: Option<&str>,
     rfb_minor: u8,
     event_tx: &Sender<VncEvent>,
@@ -97,11 +97,17 @@ pub async fn negotiate(
         info!(
             "Using RA2 (RSA-AES{}, {})",
             if sha256 { "-256" } else { "-128" },
-            if encrypt_all { "full encryption" } else { "handshake only" },
+            if encrypt_all {
+                "full encryption"
+            } else {
+                "handshake only"
+            },
         );
 
-        let pw = resolve_password(password, event_tx, cmd_rx)?;
-        let (send, recv) = ra2::handshake(&mut stream, "", &pw, sha256).await?;
+        let (send, recv) = ra2::handshake(&mut stream, sha256, |subtype| {
+            resolve_credentials(subtype, username, password, event_tx, cmd_rx)
+        })
+        .await?;
 
         if encrypt_all {
             // Everything from SecurityResult onward is inside the AES channel.
@@ -188,6 +194,7 @@ fn resolve_password(
     loop {
         match cmd_rx.recv_timeout(std::time::Duration::from_secs(120)) {
             Ok(VncCommand::ProvidePassword(pw)) => return Ok(pw),
+            Ok(VncCommand::ProvideCredentials(credentials)) => return Ok(credentials.password),
             Ok(VncCommand::Disconnect) => bail!("Disconnected by user"),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 bail!("Timed out waiting for password");
@@ -196,6 +203,67 @@ fn resolve_password(
                 bail!("UI channel closed");
             }
             Ok(_) => {} // ignore key/pointer/clipboard commands during auth
+        }
+    }
+}
+
+/// Preserve supplied fields and request only those required by the RA2 subtype.
+fn resolve_credentials(
+    subtype: ra2::CredentialSubtype,
+    username: Option<&str>,
+    password: Option<&str>,
+    event_tx: &Sender<VncEvent>,
+    cmd_rx: &Receiver<VncCommand>,
+) -> Result<Credentials> {
+    let mut username = match subtype {
+        ra2::CredentialSubtype::UsernamePassword => username.map(str::to_owned),
+        ra2::CredentialSubtype::Password => None,
+    };
+    let mut password = password.filter(|pw| !pw.is_empty()).map(str::to_owned);
+
+    loop {
+        let needs_username =
+            subtype == ra2::CredentialSubtype::UsernamePassword && username.is_none();
+        let needs_password = password.is_none();
+        if !needs_username && !needs_password {
+            return Ok(Credentials {
+                username,
+                password: password.expect("password was resolved"),
+            });
+        }
+
+        event_tx
+            .send(VncEvent::NeedCredentials {
+                username: username.clone(),
+                needs_username,
+                needs_password,
+            })
+            .map_err(|_| anyhow::anyhow!("UI channel closed"))?;
+
+        loop {
+            match cmd_rx.recv_timeout(std::time::Duration::from_secs(120)) {
+                Ok(VncCommand::ProvideCredentials(credentials)) => {
+                    if needs_username {
+                        username = credentials.username;
+                    }
+                    if needs_password {
+                        password = Some(credentials.password);
+                    }
+                    break;
+                }
+                Ok(VncCommand::ProvidePassword(pw)) if needs_password => {
+                    password = Some(pw);
+                    break;
+                }
+                Ok(VncCommand::Disconnect) => bail!("Disconnected by user"),
+                Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
+                    bail!("Timed out waiting for credentials");
+                }
+                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => {
+                    bail!("UI channel closed");
+                }
+                Ok(_) => {} // ignore session commands during authentication
+            }
         }
     }
 }
@@ -244,4 +312,277 @@ fn vnc_des_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
     response[..8].copy_from_slice(&block1);
     response[8..].copy_from_slice(&block2);
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_request(
+        event_rx: &Receiver<VncEvent>,
+        expected_username: Option<&str>,
+        expected_needs_username: bool,
+        expected_needs_password: bool,
+    ) {
+        match event_rx.try_recv().expect("credential request") {
+            VncEvent::NeedCredentials {
+                username,
+                needs_username,
+                needs_password,
+            } => {
+                assert_eq!(username.as_deref(), expected_username);
+                assert_eq!(needs_username, expected_needs_username);
+                assert_eq!(needs_password, expected_needs_password);
+            }
+            _ => panic!("expected a credential request"),
+        }
+    }
+
+    #[test]
+    fn complete_credentials_do_not_prompt() {
+        for (subtype, expected_username) in [
+            (ra2::CredentialSubtype::UsernamePassword, Some("用戶")),
+            (ra2::CredentialSubtype::Password, None),
+        ] {
+            let (event_tx, event_rx) = crossbeam_channel::unbounded();
+            let (_cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+            let credentials = resolve_credentials(
+                subtype,
+                Some("用戶"),
+                Some("supplied-password"),
+                &event_tx,
+                &cmd_rx,
+            )
+            .unwrap();
+            assert_eq!(credentials.username.as_deref(), expected_username);
+            assert_eq!(credentials.password, "supplied-password");
+            assert!(event_rx.is_empty());
+        }
+    }
+
+    #[test]
+    fn username_subtype_requests_both_missing_fields() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some("用戶".to_owned()),
+                password: "entered-password".to_owned(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            None,
+            None,
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("用戶"));
+        assert_eq!(credentials.password, "entered-password");
+        assert_request(&event_rx, None, true, true);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn missing_username_keeps_the_supplied_password() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some("entered-user".to_owned()),
+                password: "unused-response-password".to_owned(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            None,
+            Some("supplied-password"),
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("entered-user"));
+        assert_eq!(credentials.password, "supplied-password");
+        assert_request(&event_rx, None, true, false);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn missing_password_prefills_and_preserves_the_supplied_username() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some("unused-response-user".to_owned()),
+                password: "entered-password".to_owned(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            Some("supplied-user"),
+            Some(""),
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("supplied-user"));
+        assert_eq!(credentials.password, "entered-password");
+        assert_request(&event_rx, Some("supplied-user"), false, true);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn password_subtype_never_requests_a_username() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvidePassword("legacy-password".to_owned()))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::Password,
+            None,
+            None,
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username, None);
+        assert_eq!(credentials.password, "legacy-password");
+        assert_request(&event_rx, None, false, true);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn password_response_does_not_satisfy_a_missing_username() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvidePassword("legacy-password".to_owned()))
+            .unwrap();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some("entered-user".to_owned()),
+                password: "unused-response-password".to_owned(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            None,
+            None,
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("entered-user"));
+        assert_eq!(credentials.password, "legacy-password");
+        assert_request(&event_rx, None, true, true);
+        assert_request(&event_rx, None, true, false);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn explicit_empty_username_and_password_can_be_submitted() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some(String::new()),
+                password: String::new(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            None,
+            None,
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some(""));
+        assert_eq!(credentials.password, "");
+        assert_request(&event_rx, None, true, true);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn incomplete_response_requests_only_the_remaining_username() {
+        let (event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: None,
+                password: "entered-password".to_owned(),
+            }))
+            .unwrap();
+        cmd_tx
+            .send(VncCommand::ProvideCredentials(Credentials {
+                username: Some("entered-user".to_owned()),
+                password: "unused-response-password".to_owned(),
+            }))
+            .unwrap();
+        let credentials = resolve_credentials(
+            ra2::CredentialSubtype::UsernamePassword,
+            None,
+            None,
+            &event_tx,
+            &cmd_rx,
+        )
+        .unwrap();
+        assert_eq!(credentials.username.as_deref(), Some("entered-user"));
+        assert_eq!(credentials.password, "entered-password");
+        assert_request(&event_rx, None, true, true);
+        assert_request(&event_rx, None, true, false);
+        assert!(event_rx.is_empty());
+    }
+
+    #[test]
+    fn credential_prompt_can_be_cancelled_or_disconnected() {
+        for disconnect in [false, true] {
+            let (event_tx, _event_rx) = crossbeam_channel::unbounded();
+            let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+            if disconnect {
+                cmd_tx.send(VncCommand::Disconnect).unwrap();
+            }
+            drop(cmd_tx);
+            let error = resolve_credentials(
+                ra2::CredentialSubtype::UsernamePassword,
+                None,
+                None,
+                &event_tx,
+                &cmd_rx,
+            )
+            .err()
+            .expect("cancelled credential request");
+            assert_eq!(
+                error.to_string(),
+                if disconnect {
+                    "Disconnected by user"
+                } else {
+                    "UI channel closed"
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn classic_password_prompt_accepts_both_response_commands() {
+        for response in [
+            VncCommand::ProvidePassword("entered-password".to_owned()),
+            VncCommand::ProvideCredentials(Credentials {
+                username: None,
+                password: "entered-password".to_owned(),
+            }),
+        ] {
+            let (event_tx, event_rx) = crossbeam_channel::unbounded();
+            let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+            cmd_tx.send(response).unwrap();
+            assert_eq!(
+                resolve_password(None, &event_tx, &cmd_rx).unwrap(),
+                "entered-password"
+            );
+            assert!(matches!(event_rx.try_recv(), Ok(VncEvent::NeedPassword)));
+            assert!(event_rx.is_empty());
+        }
+    }
 }

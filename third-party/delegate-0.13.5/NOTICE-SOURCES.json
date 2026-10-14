@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/kobzol/rust-delegate/b129d4cbf4cc499eff7743365dcb0fe5d8d2e820/LICENSE-APACHE",
+    "revision": "b129d4cbf4cc499eff7743365dcb0fe5d8d2e820",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+  },
+  {
+    "filename": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/kobzol/rust-delegate/b129d4cbf4cc499eff7743365dcb0fe5d8d2e820/LICENSE-MIT",
+    "revision": "b129d4cbf4cc499eff7743365dcb0fe5d8d2e820",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "be7ee8aa49dc586023669a0c600a0536fce6a9f61264a53a67cdd842564ed899"
+  }
+]

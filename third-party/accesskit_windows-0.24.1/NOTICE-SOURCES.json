@@ -1,0 +1,23 @@
+[
+  {
+    "filename": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/AccessKit/accesskit/405d578cdfd8496ee79020d24cfaac8c29a8a48f/LICENSE-APACHE",
+    "revision": "405d578cdfd8496ee79020d24cfaac8c29a8a48f",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+  },
+  {
+    "filename": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/AccessKit/accesskit/405d578cdfd8496ee79020d24cfaac8c29a8a48f/LICENSE-MIT",
+    "revision": "405d578cdfd8496ee79020d24cfaac8c29a8a48f",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+  },
+  {
+    "filename": "LICENSE.chromium",
+    "url": "https://raw.githubusercontent.com/AccessKit/accesskit/405d578cdfd8496ee79020d24cfaac8c29a8a48f/LICENSE.chromium",
+    "revision": "405d578cdfd8496ee79020d24cfaac8c29a8a48f",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "845022e0c1db1abb41a6ba4cd3c4b674ec290f3359d9d3c78ae558d4c0ed9308"
+  }
+]

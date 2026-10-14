@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "COPYING",
+    "url": "https://raw.githubusercontent.com/zakarumych/gpu-alloc/7ddd1fe576fcfc503347eb97e476a47581479f22/COPYING",
+    "revision": "7ddd1fe576fcfc503347eb97e476a47581479f22",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "12121dfa588677007848ab922a45a1e3248868f6ff063598fceb3141d7897314"
+  }
+]

@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "COPYING",
+    "url": "https://raw.githubusercontent.com/zakarumych/gpu-descriptor/9f2fb9546591322e7b77ee1e79385e01effd85e4/COPYING",
+    "revision": "9f2fb9546591322e7b77ee1e79385e01effd85e4",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "f72143f7e9d9fb8bd336b139fa22f825a299591c29f2f7338c5566347b137613"
+  }
+]

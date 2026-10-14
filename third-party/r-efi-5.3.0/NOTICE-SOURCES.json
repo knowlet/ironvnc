@@ -1,0 +1,10 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/r-efi/r-efi/97b55bed1c2c91dcbf787674849f05337ff80b33/AUTHORS",
+    "revision": "97b55bed1c2c91dcbf787674849f05337ff80b33",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "Selected license: MIT. The upstream AUTHORS file is preserved verbatim, including the complete MIT permission text and copyright notices. Its other offered alternatives are retained as upstream provenance, and LGPL is not the selected license.",
+    "filename": "AUTHORS",
+    "sha256": "ff92bed461f50338dd703a9ba9aee496a425957873df1d91192776e4bdf5dda7"
+  }
+]

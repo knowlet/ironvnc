@@ -1,31 +1,41 @@
 # IronVNC
 
-A free, open-source **VNC (RFB) viewer written in Rust** — a lightweight alternative to RealVNC / TightVNC / UltraVNC with a clean egui interface, modern encodings, RealVNC-compatible encryption, and a built-in SFTP file browser.
+A free, open-source **VNC (RFB) viewer written in Rust**, with an egui interface,
+public RFB encodings, RSA-AES authentication, and an SFTP file browser.
 
 > Iron oxidizes into rust. 🦀
 
 ## Features
 
-- **Broad server compatibility** — RFB 3.3 / 3.7 / 3.8, with automatic version negotiation (never downgrades a modern server to legacy auth).
-- **Encodings:** Raw, CopyRect, Hextile, ZRLE, Tight (JPEG/Fill/Palette/Gradient), plus the DesktopSize and Cursor pseudo-encodings.
+- **Public protocol baseline:** RFB 3.3 / 3.7 / 3.8 with validated version negotiation and explicit true-colour pixel-format selection. The vendor-style `003.889` banner falls back to public RFB 3.8.
+- **Encodings:** Raw, CopyRect, Hextile, ZRLE, Tight (JPEG/Fill/Palette/Gradient), and DesktopSize. Cursor payloads can be consumed; the GUI uses its own pointer marker.
 - **Authentication:**
   - None
   - VNC Authentication (DES challenge/response)
-  - **RA2 / RSA-AES** (types 5, 6, 129, 130) — connects to modern **RealVNC** servers, including AES‑256, with full-session or handshake-only encryption.
+  - **RA2 / RSA-AES** (types 5, 6, 129, 130), including AES-256 and username/password or password-only credential subtypes, with full-session or handshake-only encryption.
 - **Session manager** — saved connections with credentials; single click opens each in its own window. Connections auto-save on connect.
 - **MobaXterm-style SFTP panel** — browse the remote host over SSH, drag-and-drop to upload, download with a click. Runs alongside the VNC session, independent of the VNC vendor.
-- **Quality-of-life:** smooth scale-to-fit rendering, clipboard sync (both directions), scroll-wheel support, a Ctrl+Alt+Del button, desktop-name window titles, and partial-framebuffer updates for responsiveness at 4K.
+- **Clipboard:** Latin-1 standard CutText and negotiated UTF-8 Extended Clipboard text in both directions. Non-Latin-1 characters become `?` on basic-only servers. Image/file clipboard transfer is unsupported.
+- **macOS input:** Command maps to Meta; Unicode text uses RFB Unicode keysyms. Apple private ARD authentication and high-performance Screen Sharing are unsupported.
+- **Quality-of-life:** scale-to-fit rendering, scroll-wheel support, a Ctrl+Alt+Del button, desktop-name window titles, and partial-framebuffer updates.
 
 ## Install / Build
 
 Requires a [Rust toolchain](https://rustup.rs/).
 
 ```bash
-git clone https://github.com/hkder/ironvnc
+git clone https://github.com/knowlet/ironvnc
 cd ironvnc
-cargo build --release
+cargo build --locked --release --jobs 2
 # binary at target/release/ironvnc
 ```
+
+The [native binary workflow](https://github.com/knowlet/ironvnc/actions/workflows/ci.yml)
+builds and runs headless tests on Linux, macOS, and Windows, on x64 and ARM64.
+Download the per-target Actions artifact; it includes the binary, licenses,
+dependency notices, source/build provenance and SHA256 checksums. These are
+unsigned executables, not installers. See the [support matrix](docs/SUPPORT.md)
+for tested OS baselines and verification limits.
 
 ## Usage
 
@@ -40,23 +50,39 @@ Or connect directly:
 ```bash
 ironvnc --host 192.168.1.50            # defaults to port 5900
 ironvnc --host 192.168.1.50 --port 5901
+ironvnc --host 192.168.1.50 --username alice
 ironvnc --session "My Desktop"          # open a saved session by name
 ```
 
 If the server requires a password, IronVNC prompts for it in a popup and (on success) saves the session so you don't have to re-enter it. Saved sessions live in `sessions.json` **next to the executable** — the path is shown at the bottom of the session manager.
 
+RA2 servers requesting an account also prompt for a missing VNC username.
+Use `-U` / `--username` for VNC; `--user` remains the SSH/SFTP option. Saved
+sessions preserve their identity when accounts share an endpoint. Ambiguous
+ad-hoc credential lookup requires an explicit session or username. Existing
+session files remain readable.
+
 ### Headless self-test
 
 ```bash
 ironvnc --test -H <host> -P <password>            # connect, verify a framebuffer decodes, exit
+ironvnc --test -H <host> -U <username> -P <password> # RA2 account authentication
 ironvnc --sftp-test -H <host> --user <u> -P <pw>  # verify SSH/SFTP connectivity
 ```
+
+`--test` accepts a valid black frame and never sends pointer or keyboard input.
+For isolated synthetic interoperability tests, run
+`python3 scripts/rfb_fixture.py --binary target/release/ironvnc`.
 
 ## Security notes
 
 - `sessions.json` stores passwords in plaintext and is **gitignored** — do not commit it.
 - The RA2 host key is currently accepted without pinning (convenient for trusted networks); certificate/known-hosts verification is a planned improvement.
 - VeNCrypt (TLS) and Apple ARD authentication are not yet implemented.
+
+See [public protocol scope](docs/PROTOCOL.md), [review/provenance](docs/REVIEW.md),
+and [verification limits](docs/SUPPORT.md). Synthetic protocol tests do not
+certify interoperability with real Apple, RealVNC, or TigerVNC desktops.
 
 ## License
 

@@ -1,5 +1,5 @@
 use crate::framebuffer::Framebuffer;
-use anyhow::Result;
+use anyhow::{ensure, Result};
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 pub async fn decode<S>(
@@ -15,6 +15,12 @@ where
 {
     let src_x = stream.read_u16().await?;
     let src_y = stream.read_u16().await?;
+    for (x, y) in [(src_x, src_y), (dst_x, dst_y)] {
+        ensure!(
+            u32::from(x) + u32::from(w) <= fb.width && u32::from(y) + u32::from(h) <= fb.height,
+            "CopyRect is outside the framebuffer"
+        );
+    }
     fb.copy_rect(
         dst_x as u32,
         dst_y as u32,

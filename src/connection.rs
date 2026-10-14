@@ -1,4 +1,5 @@
 use crate::protocol::client::VncClient;
+use crate::sessions::SessionIdentity;
 use crossbeam_channel::{Receiver, Sender};
 use std::thread;
 
@@ -6,7 +7,16 @@ use std::thread;
 pub struct ConnectionParams {
     pub host: String,
     pub port: u16,
+    pub username: Option<String>,
     pub password: Option<String>,
+    /// The saved session selected by the user, independent of its endpoint.
+    pub source_session: Option<SessionIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Credentials {
+    pub username: Option<String>,
+    pub password: String,
 }
 
 /// A single changed rectangle: tightly-packed `w*h*4` RGBA bytes at (x, y).
@@ -29,18 +39,32 @@ pub enum VncEvent {
     ClipboardText(String),
     /// Server requires VNC authentication — UI should prompt for password.
     NeedPassword,
+    /// Ask only for missing fields after the server selects its auth subtype.
+    NeedCredentials {
+        username: Option<String>,
+        needs_username: bool,
+        needs_password: bool,
+    },
     Error(String),
     Disconnected,
 }
 
 /// Commands sent from the UI thread to the VNC background thread.
 pub enum VncCommand {
-    KeyEvent { down: bool, keysym: u32 },
-    PointerEvent { buttons: u8, x: u16, y: u16 },
+    KeyEvent {
+        down: bool,
+        keysym: u32,
+    },
+    PointerEvent {
+        buttons: u8,
+        x: u16,
+        y: u16,
+    },
     /// Send clipboard text to the server.
     SetClipboard(String),
     /// Response to NeedPassword: provide the password to the waiting auth step.
     ProvidePassword(String),
+    ProvideCredentials(Credentials),
     Disconnect,
 }
 
@@ -87,8 +111,10 @@ impl VncConnection {
         let _ = self.cmd_tx.send(VncCommand::SetClipboard(text));
     }
 
-    pub fn provide_password(&self, pw: String) {
-        let _ = self.cmd_tx.send(VncCommand::ProvidePassword(pw));
+    pub fn provide_credentials(&self, credentials: Credentials) {
+        let _ = self
+            .cmd_tx
+            .send(VncCommand::ProvideCredentials(credentials));
     }
 
     pub fn disconnect(&self) {

@@ -34,10 +34,17 @@ pub enum TransferCommand {
 
 /// Background → UI events.
 pub enum TransferEvent {
-    Connected { home: String },
-    DirListing { path: String, entries: Vec<RemoteEntry> },
+    Connected {
+        home: String,
+    },
+    DirListing {
+        path: String,
+        entries: Vec<RemoteEntry>,
+    },
     Status(String),
-    TransferDone { name: String },
+    TransferDone {
+        name: String,
+    },
     Error(String),
     Disconnected,
 }
@@ -85,7 +92,9 @@ impl TransferSession {
         let _ = self.cmd_tx.send(TransferCommand::ListDir(path));
     }
     pub fn upload(&self, local: PathBuf, remote_dir: String) {
-        let _ = self.cmd_tx.send(TransferCommand::Upload { local, remote_dir });
+        let _ = self
+            .cmd_tx
+            .send(TransferCommand::Upload { local, remote_dir });
     }
     pub fn download(&self, remote: String, local_dir: PathBuf) {
         let _ = self
@@ -129,9 +138,10 @@ async fn run(
     )));
 
     let config = Arc::new(russh::client::Config::default());
-    let mut handle = russh::client::connect(config, (params.host.as_str(), params.port), SshHandler)
-        .await
-        .with_context(|| format!("SSH connect to {}:{}", params.host, params.port))?;
+    let mut handle =
+        russh::client::connect(config, (params.host.as_str(), params.port), SshHandler)
+            .await
+            .with_context(|| format!("SSH connect to {}:{}", params.host, params.port))?;
 
     let auth = handle
         .authenticate_password(&params.username, &params.password)
@@ -168,19 +178,17 @@ async fn run(
         match cmd {
             TransferCommand::Disconnect => break,
             TransferCommand::ListDir(path) => send_listing(&sftp, &path, event_tx).await,
-            TransferCommand::Mkdir(path) => {
-                match sftp.create_dir(&path).await {
-                    Ok(_) => {
-                        let _ = event_tx.send(TransferEvent::Status(format!("Created {path}")));
-                        if let Some(parent) = parent_of(&path) {
-                            send_listing(&sftp, &parent, event_tx).await;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = event_tx.send(TransferEvent::Error(format!("mkdir {path}: {e}")));
+            TransferCommand::Mkdir(path) => match sftp.create_dir(&path).await {
+                Ok(_) => {
+                    let _ = event_tx.send(TransferEvent::Status(format!("Created {path}")));
+                    if let Some(parent) = parent_of(&path) {
+                        send_listing(&sftp, &parent, event_tx).await;
                     }
                 }
-            }
+                Err(e) => {
+                    let _ = event_tx.send(TransferEvent::Error(format!("mkdir {path}: {e}")));
+                }
+            },
             TransferCommand::Upload { local, remote_dir } => {
                 if let Err(e) = upload(&sftp, &local, &remote_dir, event_tx).await {
                     let _ = event_tx.send(TransferEvent::Error(format!(

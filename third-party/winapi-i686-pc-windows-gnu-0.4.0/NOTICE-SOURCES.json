@@ -1,0 +1,42 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/retep998/winapi-rs/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa/LICENSE-MIT",
+    "revision": "9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa",
+    "revision_kind": "published-crate-content-matched-inferred",
+    "notes": "No published-crate .cargo_vcs_info.json or target-crate 0.4.0 version tag exists. This commit was inferred from repository history and matched by Git blob hash against all 1390 packaged original files (Cargo.toml.orig mapped to Cargo.toml; generated Cargo.toml and .cargo-ok excluded). This is content-matched provenance, not a publisher-recorded VCS revision. Selected license: MIT.",
+    "filename": "LICENSE-MIT",
+    "sha256": "5b19674a1db628a475850a131956ed49521b744e3dda8f5a94141f9aba681219"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/retep998/winapi-rs/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa/LICENSE-APACHE",
+    "revision": "9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa",
+    "revision_kind": "published-crate-content-matched-inferred",
+    "notes": "No published-crate .cargo_vcs_info.json or target-crate 0.4.0 version tag exists. This commit was inferred from repository history and matched by Git blob hash against all 1390 packaged original files (Cargo.toml.orig mapped to Cargo.toml; generated Cargo.toml and .cargo-ok excluded). This is content-matched provenance, not a publisher-recorded VCS revision. Selected license: MIT.",
+    "filename": "LICENSE-APACHE",
+    "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/retep998/winapi-rs/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa/i686/Cargo.toml",
+    "revision": "9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa",
+    "revision_kind": "published-crate-content-matched-inferred",
+    "notes": "No published-crate .cargo_vcs_info.json or target-crate 0.4.0 version tag exists. This commit was inferred from repository history and matched by Git blob hash against all 1390 packaged original files (Cargo.toml.orig mapped to Cargo.toml; generated Cargo.toml and .cargo-ok excluded). This is content-matched provenance, not a publisher-recorded VCS revision. Selected license: MIT.",
+    "filename": "LICENSE-DECLARATION.toml",
+    "sha256": "5257d6f5283ab052b6af51f578a8c74e14c31deb53a7c6cd9e6fa16135d57eb3"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/retep998/winapi-rs/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa/i686/src/lib.rs",
+    "revision": "9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa",
+    "revision_kind": "published-crate-content-matched-inferred",
+    "notes": "No published-crate .cargo_vcs_info.json or target-crate 0.4.0 version tag exists. This commit was inferred from repository history and matched by Git blob hash against all 1390 packaged original files (Cargo.toml.orig mapped to Cargo.toml; generated Cargo.toml and .cargo-ok excluded). This is content-matched provenance, not a publisher-recorded VCS revision. Selected license: MIT. Verbatim lines 1-6 of i686/src/lib.rs; copyright and license header only.",
+    "filename": "LIB-COPYRIGHT-SOURCE.txt",
+    "sha256": "9b0a59b4c5af60f46f79d2adbe433e07189d076972b8d33e9abca077dc10ccf7"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/retep998/winapi-rs/9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa/i686/build.rs",
+    "revision": "9497609ef44cc9bcd16cd2411c0ee6ccaf5483aa",
+    "revision_kind": "published-crate-content-matched-inferred",
+    "notes": "No published-crate .cargo_vcs_info.json or target-crate 0.4.0 version tag exists. This commit was inferred from repository history and matched by Git blob hash against all 1390 packaged original files (Cargo.toml.orig mapped to Cargo.toml; generated Cargo.toml and .cargo-ok excluded). This is content-matched provenance, not a publisher-recorded VCS revision. Selected license: MIT. Verbatim lines 1-6 of i686/build.rs; copyright and license header only.",
+    "filename": "BUILD-COPYRIGHT-SOURCE.txt",
+    "sha256": "72f9dd4f441e55dbd746f776e04290d076584f469e9d0c964b152bf909029ad3"
+  }
+]

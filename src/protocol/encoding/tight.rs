@@ -29,7 +29,7 @@ impl TightState {
     }
 }
 
-// Subtype constants (lower nibble of control byte).
+// Subtype constants (upper nibble of control byte).
 const FILL: u8 = 0x08;
 const JPEG: u8 = 0x09;
 
@@ -54,16 +54,19 @@ pub async fn decode<S>(
 where
     S: AsyncRead + Unpin,
 {
+    if w > 2048 {
+        bail!("Tight rectangle width exceeds 2048");
+    }
     let control = stream.read_u8().await?;
 
-    // Upper nibble: bit 4 resets stream 0, bit 5 → stream 1, ..., bit 7 → stream 3.
+    // Low nibble resets the four streams; high nibble selects compression.
     for i in 0..4usize {
-        if control & (0x10u8 << i) != 0 {
+        if control & (1u8 << i) != 0 {
             state.reset(i);
         }
     }
 
-    let subtype = control & 0x0F;
+    let subtype = control >> 4;
     let tight_bpp = tight_bytes_per_pixel(pf);
 
     match subtype {
@@ -73,7 +76,10 @@ where
             // BasicCompression: bits 1-0 = stream index, bit 2 = filter present.
             let stream_idx = (s & 0x03) as usize;
             let has_filter = (s & 0x04) != 0;
-            basic(stream, fb, pf, x, y, w, h, tight_bpp, stream_idx, has_filter, state).await
+            basic(
+                stream, fb, pf, x, y, w, h, tight_bpp, stream_idx, has_filter, state,
+            )
+            .await
         }
         _ => bail!("Unknown Tight subtype 0x{subtype:02X}"),
     }
@@ -106,14 +112,7 @@ where
     Ok(())
 }
 
-async fn jpeg<S>(
-    stream: &mut S,
-    fb: &mut Framebuffer,
-    x: u16,
-    y: u16,
-    w: u16,
-    h: u16,
-) -> Result<()>
+async fn jpeg<S>(stream: &mut S, fb: &mut Framebuffer, x: u16, y: u16, w: u16, h: u16) -> Result<()>
 where
     S: AsyncRead + Unpin,
 {
@@ -121,7 +120,17 @@ where
     let mut data = vec![0u8; len];
     stream.read_exact(&mut data).await?;
 
-    let img = image::load_from_memory_with_format(&data, image::ImageFormat::Jpeg)?;
+    let mut reader =
+        image::ImageReader::with_format(std::io::Cursor::new(&data), image::ImageFormat::Jpeg);
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(w as u32);
+    limits.max_image_height = Some(h as u32);
+    limits.max_alloc = Some(w as u64 * h as u64 * 16 + 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode()?;
+    if img.width() != w as u32 || img.height() != h as u32 {
+        bail!("Tight JPEG dimensions do not match rectangle");
+    }
     let rgb = img.to_rgb8();
     let n = w as usize * h as usize;
     let mut rgba = vec![255u8; n * 4];
@@ -161,7 +170,8 @@ where
     match filter {
         FILTER_COPY => {
             let raw_len = n_pixels * tight_bpp;
-            let raw = read_maybe_compressed(stream, raw_len, &mut state.streams[stream_idx]).await?;
+            let raw =
+                read_maybe_compressed(stream, raw_len, &mut state.streams[stream_idx]).await?;
             let rgba = pixels_to_rgba(&raw, tight_bpp, pf, n_pixels);
             fb.blit_rgba(x as u32, y as u32, w as u32, h as u32, &rgba);
         }
@@ -177,6 +187,9 @@ where
 
         FILTER_PALETTE => {
             let n_colors = stream.read_u8().await? as usize + 1;
+            if n_colors < 2 {
+                bail!("Tight palette requires at least two colours");
+            }
             let mut pal_raw = vec![0u8; n_colors * tight_bpp];
             stream.read_exact(&mut pal_raw).await?;
             let palette: Vec<(u8, u8, u8)> = (0..n_colors)
@@ -214,7 +227,9 @@ where
                 }
             } else {
                 for (i, &idx) in index_data.iter().take(n_pixels).enumerate() {
-                    let (r, g, b) = palette[(idx as usize).min(palette.len() - 1)];
+                    let Some(&(r, g, b)) = palette.get(idx as usize) else {
+                        bail!("Tight palette index out of range");
+                    };
                     rgba[i * 4] = r;
                     rgba[i * 4 + 1] = g;
                     rgba[i * 4 + 2] = b;
@@ -228,7 +243,7 @@ where
     Ok(())
 }
 
-/// Read `expected` raw bytes; if > MIN_TO_COMPRESS, read a compact length then zlib-decompress.
+/// Read raw bytes below MIN_TO_COMPRESS; otherwise read compact-length zlib data.
 async fn read_maybe_compressed<S>(
     stream: &mut S,
     expected: usize,
@@ -237,7 +252,7 @@ async fn read_maybe_compressed<S>(
 where
     S: AsyncRead + Unpin,
 {
-    if expected <= MIN_TO_COMPRESS {
+    if expected < MIN_TO_COMPRESS {
         let mut buf = vec![0u8; expected];
         stream.read_exact(&mut buf).await?;
         return Ok(buf);
@@ -245,8 +260,16 @@ where
     let len = read_compact_len(stream).await?;
     let mut compressed = vec![0u8; len];
     stream.read_exact(&mut compressed).await?;
-    let mut raw = Vec::with_capacity(expected);
+    let mut raw = Vec::with_capacity(expected + 1);
+    let before_in = decomp.total_in();
+    let before_out = decomp.total_out();
     decomp.decompress_vec(&compressed, &mut raw, FlushDecompress::Sync)?;
+    if raw.len() != expected
+        || decomp.total_in() - before_in != len as u64
+        || decomp.total_out() - before_out != expected as u64
+    {
+        bail!("Tight compressed payload length mismatch");
+    }
     Ok(raw)
 }
 
@@ -279,13 +302,8 @@ fn tight_bytes_per_pixel(pf: &PixelFormat) -> usize {
 /// Convert a tight pixel byte slice to (R, G, B).
 fn tight_pixel_rgb(data: &[u8], pf: &PixelFormat) -> (u8, u8, u8) {
     if pf.bits_per_pixel == 32 && data.len() >= 3 {
-        // Tight 32bpp cpixel: 3 bytes in pixel-memory order (4th byte always 0, stripped).
-        let pixel = if pf.big_endian {
-            u32::from_be_bytes([0, data[0], data[1], data[2]])
-        } else {
-            u32::from_le_bytes([data[0], data[1], data[2], 0])
-        };
-        pf.to_rgb(pixel)
+        // Tight's depth-24 special case is RGB, independent of byte order.
+        (data[0], data[1], data[2])
     } else {
         let bpp = data.len().min(4);
         let pixel = read_pixel(data, bpp, pf.big_endian);
@@ -325,6 +343,114 @@ fn inverse_gradient(raw: &mut [u8], w: usize, h: usize, bpp: usize) {
                 let predicted = (left + top - tl).clamp(0, 255) as u8;
                 raw[idx] = raw[idx].wrapping_add(predicted);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::{write::ZlibEncoder, Compression};
+    use std::io::Write;
+
+    #[tokio::test]
+    async fn fill_uses_high_nibble_and_rgb_order() {
+        let mut wire = &b"\x81\xff\x10\x20"[..];
+        let mut fb = Framebuffer::new(2, 1);
+        decode(
+            &mut wire,
+            &mut fb,
+            &PixelFormat::preferred(),
+            0,
+            0,
+            2,
+            1,
+            &mut TightState::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(fb.pixels, [255, 16, 32, 255, 255, 16, 32, 255]);
+    }
+
+    #[tokio::test]
+    async fn exactly_twelve_bytes_are_compressed() {
+        let expected = [255, 0, 0, 0, 255, 0, 0, 0, 255, 255, 255, 255];
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&expected).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut wire = vec![0, compressed.len() as u8];
+        wire.extend(compressed);
+        let mut fb = Framebuffer::new(2, 2);
+        decode(
+            &mut wire.as_slice(),
+            &mut fb,
+            &PixelFormat::preferred(),
+            0,
+            0,
+            2,
+            2,
+            &mut TightState::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fb.pixels,
+            [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]
+        );
+    }
+
+    #[tokio::test]
+    async fn truncated_gradient_is_rejected_before_indexing() {
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&[1, 2, 3]).unwrap();
+        let compressed = encoder.finish().unwrap();
+        let mut wire = vec![0x40, 2, compressed.len() as u8];
+        wire.extend(compressed);
+        let mut fb = Framebuffer::new(2, 2);
+        assert!(decode(
+            &mut wire.as_slice(),
+            &mut fb,
+            &PixelFormat::preferred(),
+            0,
+            0,
+            2,
+            2,
+            &mut TightState::new()
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn compressed_stream_persists_across_rectangles_and_can_reset() {
+        use flate2::{Compress, FlushCompress};
+        let mut compressor = Compress::new(Compression::default(), true);
+        let mut state = TightState::new();
+        let mut fb = Framebuffer::new(2, 2);
+        for (index, colour) in [[255, 0, 0], [0, 255, 0], [0, 0, 255]].iter().enumerate() {
+            if index == 2 {
+                compressor = Compress::new(Compression::default(), true);
+            }
+            let raw = colour.repeat(4);
+            let mut compressed = Vec::with_capacity(128);
+            compressor
+                .compress_vec(&raw, &mut compressed, FlushCompress::Sync)
+                .unwrap();
+            let mut wire = vec![if index == 2 { 1 } else { 0 }, compressed.len() as u8];
+            wire.extend(compressed);
+            decode(
+                &mut wire.as_slice(),
+                &mut fb,
+                &PixelFormat::preferred(),
+                0,
+                0,
+                2,
+                2,
+                &mut state,
+            )
+            .await
+            .unwrap();
+            assert_eq!(&fb.pixels[..4], &[colour[0], colour[1], colour[2], 255]);
         }
     }
 }

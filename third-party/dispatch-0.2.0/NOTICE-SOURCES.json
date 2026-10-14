@@ -1,0 +1,18 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/SSheldon/rust-dispatch/82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748/Cargo.toml",
+    "revision": "82d6c7a5b75dc0c71c3f46f87bb6c16a476f7748",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "The published crate records this commit in .cargo_vcs_info.json. Its upstream tree contains no separate license file; this manifest contains the original MIT license declaration and authors.",
+    "filename": "LICENSE-DECLARATION.toml",
+    "sha256": "05c60b829931ef7f1f130735843c11f5cf9cc69546eca5fc941d014781c68e31"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/8a04f0303d95c4f932210b118588c662665bd383/text/MIT.txt",
+    "revision": "8a04f0303d95c4f932210b118588c662665bd383",
+    "revision_kind": "standard-license-text-exact",
+    "notes": "Unmodified SPDX standard MIT text, from license-list-data v3.26.0 resolved to this commit. This generic text is supplied separately from the package publisher declaration; no copyright holder is invented or substituted.",
+    "filename": "LICENSE-MIT",
+    "sha256": "6d7c9e9d7d12c8d3753bdb24417b84819ba4d6c2f025c37948113d86dc81eef9"
+  }
+]

@@ -20,15 +20,23 @@ where
     S: AsyncRead + Unpin,
 {
     let data_len = stream.read_u32().await? as usize;
+    if data_len > 128 * 1024 * 1024 {
+        bail!("ZRLE compressed rectangle exceeds 128 MiB limit");
+    }
     let mut compressed = vec![0u8; data_len];
     stream.read_exact(&mut compressed).await?;
 
     // Upper bound on decompressed output: raw pixels + per-tile headers.
-    let max_out = (w as usize * h as usize * (pf.bits_per_pixel / 8) as usize) + 4096;
-    let mut raw = Vec::with_capacity(max_out);
+    let tiles = (w as usize).div_ceil(64) * (h as usize).div_ceil(64);
+    let max_out = w as usize * h as usize * 6 + tiles * 400;
+    let mut raw = Vec::with_capacity(max_out + 1);
 
     // ZRLE servers use Z_SYNC_FLUSH so all bytes for this rectangle are in `compressed`.
+    let before_in = decomp.total_in();
     decomp.decompress_vec(&compressed, &mut raw, FlushDecompress::Sync)?;
+    if raw.len() > max_out || decomp.total_in() - before_in != data_len as u64 {
+        bail!("ZRLE payload exceeds rectangle bounds");
+    }
 
     decode_tiles(&raw, fb, pf, x, y, w, h)?;
     Ok(())
@@ -128,16 +136,12 @@ fn decode_tiles(
                         let mut bit_pos = 0usize;
                         for _ in 0..tile_w as usize {
                             let byte_idx = bit_pos / 8;
-                            let idx = if bits_per_idx == 1 {
-                                (row_data[byte_idx] >> (7 - bit_pos % 8)) & 1
-                            } else if bits_per_idx == 2 {
-                                (row_data[byte_idx] >> (6 - (bit_pos % 4) * 2)) & 3
-                            } else if bit_pos % 2 == 0 {
-                                (row_data[byte_idx] >> 4) & 0xf
-                            } else {
-                                row_data[byte_idx] & 0xf
+                            let shift = 8 - bits_per_idx - bit_pos % 8;
+                            let idx = (row_data[byte_idx] >> shift) & ((1 << bits_per_idx) - 1);
+                            let Some(&colour) = palette.get(idx as usize) else {
+                                bail!("ZRLE packed palette index out of range");
                             };
-                            out.push(palette[idx as usize]);
+                            out.push(colour);
                             bit_pos += bits_per_idx;
                         }
                     }
@@ -162,6 +166,9 @@ fn decode_tiles(
                             let b = raw[pos] as usize;
                             pos += 1;
                             run_len += b;
+                            if run_len > n_pixels - out.len() {
+                                bail!("ZRLE run exceeds tile bounds");
+                            }
                             if b < 255 {
                                 break;
                             }
@@ -211,6 +218,9 @@ fn decode_tiles(
                                 let b = raw[pos] as usize;
                                 pos += 1;
                                 run_len += b;
+                                if run_len > n_pixels - out.len() {
+                                    bail!("ZRLE palette run exceeds tile bounds");
+                                }
                                 if b < 255 {
                                     break;
                                 }
@@ -242,5 +252,85 @@ fn decode_tiles(
         }
         ty += tile_h;
     }
+    if pos != raw.len() {
+        bail!("Trailing ZRLE tile data");
+    }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_palette_extracts_every_two_bit_index() {
+        // 3 colours BGR, followed by indices 0,1,2,0.
+        let data = [3, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0b00011000];
+        let mut fb = Framebuffer::new(4, 1);
+        decode_tiles(&data, &mut fb, &PixelFormat::preferred(), 0, 0, 4, 1).unwrap();
+        assert_eq!(
+            fb.pixels,
+            [255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn invalid_palette_and_overlong_runs_return_errors() {
+        let pf = PixelFormat::preferred();
+        let mut fb = Framebuffer::new(1, 1);
+        assert!(decode_tiles(
+            &[3, 0, 0, 255, 0, 255, 0, 255, 0, 0, 0xc0],
+            &mut fb,
+            &pf,
+            0,
+            0,
+            1,
+            1
+        )
+        .is_err());
+        assert!(decode_tiles(&[128, 0, 0, 255, 255], &mut fb, &pf, 0, 0, 1, 1).is_err());
+        assert!(decode_tiles(
+            &[130, 0, 0, 255, 0, 255, 0, 0x80, 2],
+            &mut fb,
+            &pf,
+            0,
+            0,
+            1,
+            1
+        )
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn shared_zlib_stream_survives_sync_flush_rectangles() {
+        use flate2::{Compress, Compression, FlushCompress};
+        let mut compressor = Compress::new(Compression::default(), true);
+        let mut decompressor = Decompress::new(true);
+        let mut fb = Framebuffer::new(2, 2);
+        for (pixel, expected) in [
+            ([0, 0, 255], [255, 0, 0, 255]),
+            ([0, 255, 0], [0, 255, 0, 255]),
+        ] {
+            let raw = [1, pixel[0], pixel[1], pixel[2]];
+            let mut compressed = Vec::with_capacity(128);
+            compressor
+                .compress_vec(&raw, &mut compressed, FlushCompress::Sync)
+                .unwrap();
+            let mut wire = (compressed.len() as u32).to_be_bytes().to_vec();
+            wire.extend(compressed);
+            decode(
+                &mut wire.as_slice(),
+                &mut fb,
+                &PixelFormat::preferred(),
+                0,
+                0,
+                2,
+                2,
+                &mut decompressor,
+            )
+            .await
+            .unwrap();
+            assert_eq!(&fb.pixels[..4], &expected);
+        }
+    }
 }
