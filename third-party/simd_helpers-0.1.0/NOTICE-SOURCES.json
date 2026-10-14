@@ -1,0 +1,18 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/lu-zero/simd_helpers/ca1a2f84aa386d758e98f8a609d990263932fb85/Cargo.toml",
+    "revision": "ca1a2f84aa386d758e98f8a609d990263932fb85",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "The published crate records this commit in .cargo_vcs_info.json. Its upstream tree contains no separate license file; this manifest contains the original MIT license declaration and author.",
+    "filename": "LICENSE-DECLARATION.toml",
+    "sha256": "b41497677a5498040f2eb3fc089e3c2c38c413dca64f41dc57a115e26480461d"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/8a04f0303d95c4f932210b118588c662665bd383/text/MIT.txt",
+    "revision": "8a04f0303d95c4f932210b118588c662665bd383",
+    "revision_kind": "standard-license-text-exact",
+    "notes": "Unmodified SPDX standard MIT text, from license-list-data v3.26.0 resolved to this commit. This generic text is supplied separately from the package publisher declaration; no copyright holder is invented or substituted.",
+    "filename": "LICENSE-MIT",
+    "sha256": "6d7c9e9d7d12c8d3753bdb24417b84819ba4d6c2f025c37948113d86dc81eef9"
+  }
+]

@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "LICENSE",
+    "url": "https://raw.githubusercontent.com/brendanzab/codespan/fd389a13f5bb6d625b71e2e4694b26e127f393f9/LICENSE",
+    "revision": "fd389a13f5bb6d625b71e2e4694b26e127f393f9",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  }
+]

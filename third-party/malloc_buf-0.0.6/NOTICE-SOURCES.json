@@ -1,0 +1,18 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/SSheldon/malloc_buf/a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9/Cargo.toml",
+    "revision": "a7811e5f4c6f9685dd57ad9bfe34e9bf6b0ba4f9",
+    "revision_kind": "version-tag-inferred",
+    "notes": "No .cargo_vcs_info.json was included in the published crate. Upstream tag 0.0.6 resolves to this commit; its manifest license declaration is provided without claiming a published-crate VCS identity.",
+    "filename": "LICENSE-DECLARATION.toml",
+    "sha256": "1c70c91688d9850272e43cee9b189ffe3fe667151d7caf576a36a720f8b28194"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/spdx/license-list-data/8a04f0303d95c4f932210b118588c662665bd383/text/MIT.txt",
+    "revision": "8a04f0303d95c4f932210b118588c662665bd383",
+    "revision_kind": "standard-license-text-exact",
+    "notes": "Unmodified SPDX standard MIT text, from license-list-data v3.26.0 resolved to this commit. This generic text is supplied separately from the package publisher declaration; no copyright holder is invented or substituted.",
+    "filename": "LICENSE-MIT",
+    "sha256": "6d7c9e9d7d12c8d3753bdb24417b84819ba4d6c2f025c37948113d86dc81eef9"
+  }
+]

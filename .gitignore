@@ -1,5 +1,7 @@
 # Build artifacts
 /target
+/dist
+__pycache__/
 
 # Saved sessions (may contain hostnames and passwords) — never commit
 sessions.json

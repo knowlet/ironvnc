@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "LICENSE",
+    "url": "https://raw.githubusercontent.com/tokio-rs/valuable/9efc29b6e58cef28f6566a47aa7e142a55fead77/LICENSE",
+    "revision": "9efc29b6e58cef28f6566a47aa7e142a55fead77",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "ed60d479b8fd1f64e9cbc3de449a16a53ac1b3d1b6aeb9bf9d190a8e93061b44"
+  }
+]

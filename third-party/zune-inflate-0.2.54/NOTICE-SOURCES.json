@@ -1,0 +1,26 @@
+[
+  {
+    "url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE-ZLIB",
+    "revision": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "Selected license: Zlib, one of the alternatives declared by zune-inflate 0.2.54. This complete root license text is preserved verbatim.",
+    "filename": "LICENSE-ZLIB",
+    "sha256": "7fa429541e55b1509909e058f2d21a37467e4958ec713b357f6e0cf9dc4ee352"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/LICENSE.md",
+    "revision": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "Original repository copyright and alternative-license notice, preserved verbatim.",
+    "filename": "LICENSE-UPSTREAM.md",
+    "sha256": "e870d7fd7819a9f0453c62798cb52ae95d148a8c91dc2de1d983f997143c72de"
+  },
+  {
+    "url": "https://raw.githubusercontent.com/etemesi254/zune-image/69502ce83fdfecdd0beefd677e2abb3781b29d98/zune-inflate/src/lib.rs",
+    "revision": "69502ce83fdfecdd0beefd677e2abb3781b29d98",
+    "revision_kind": "published-crate-vcs-exact",
+    "notes": "Verbatim lines 1-5 of zune-inflate/src/lib.rs; copyright and license header only.",
+    "filename": "COPYRIGHT-SOURCE.txt",
+    "sha256": "82dadd3c4a4df0d55d055f78f0fbb14e2fc3f66516a45d57dbcc5aadf32ebbb0"
+  }
+]

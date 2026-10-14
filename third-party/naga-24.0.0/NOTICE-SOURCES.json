@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "LICENSE.APACHE",
+    "url": "https://raw.githubusercontent.com/gfx-rs/wgpu/dc1e50e08cd4a5c8d6c3e8a180e93535d40bec4a/LICENSE.APACHE",
+    "revision": "dc1e50e08cd4a5c8d6c3e8a180e93535d40bec4a",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9"
+  },
+  {
+    "filename": "LICENSE.MIT",
+    "url": "https://raw.githubusercontent.com/gfx-rs/wgpu/dc1e50e08cd4a5c8d6c3e8a180e93535d40bec4a/LICENSE.MIT",
+    "revision": "dc1e50e08cd4a5c8d6c3e8a180e93535d40bec4a",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "c7fea58d1cfe49634cd92e54fc10a9d871f4b275321a4cd8c09e449122caaeb4"
+  }
+]

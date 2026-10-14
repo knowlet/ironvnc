@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/rust-windowing/android-ndk-rs/10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-APACHE",
+    "revision": "10f2ba388fca20f7349996ebae26ccda7a6fda5c",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+  },
+  {
+    "filename": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/rust-windowing/android-ndk-rs/10f2ba388fca20f7349996ebae26ccda7a6fda5c/LICENSE-MIT",
+    "revision": "10f2ba388fca20f7349996ebae26ccda7a6fda5c",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "508a77d2e7b51d98adeed32648ad124b7b30241a8e70b2e72c99f92d8e5874d1"
+  }
+]

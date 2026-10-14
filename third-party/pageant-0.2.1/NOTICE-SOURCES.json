@@ -1,0 +1,9 @@
+[
+  {
+    "filename": "LICENSE.txt",
+    "url": "https://raw.githubusercontent.com/warp-tech/russh/1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7/LICENSE.txt",
+    "revision": "1947d6b1bb3a9d79840b5adf7eb9b33df2c6e4a7",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+  }
+]

@@ -1,0 +1,113 @@
+name: Native binaries
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: X64
+            target: x86_64-unknown-linux-gnu
+            python: python3
+          - runner: ubuntu-24.04-arm
+            arch: ARM64
+            target: aarch64-unknown-linux-gnu
+            python: python3
+          - runner: macos-15-intel
+            arch: X64
+            target: x86_64-apple-darwin
+            python: python3
+          - runner: macos-15
+            arch: ARM64
+            target: aarch64-apple-darwin
+            python: python3
+          - runner: windows-2022
+            arch: X64
+            target: x86_64-pc-windows-msvc
+            python: python
+          - runner: windows-11-arm
+            arch: ARM64
+            target: aarch64-pc-windows-msvc
+            python: python
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_BUILD_JOBS: 2
+      RUSTUP_TOOLCHAIN: stable-${{ matrix.target }}
+      NATIVE_TARGET: ${{ matrix.target }}
+      EXPECTED_RUNNER_ARCH: ${{ matrix.arch }}
+      # Build the exact reviewed head, rather than GitHub's synthetic merge ref.
+      SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - name: Check out exact source commit
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Install Linux GUI build and runtime libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential pkg-config libclang-dev libgtk-3-dev libssl-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libegl1-mesa-dev
+
+      - name: Install native Rust and verify runner architecture
+        run: |
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt
+          actual_host=$(rustc --version --verbose | tr -d '\r' | sed -n 's/^host: //p')
+          test "$actual_host" = "$NATIVE_TARGET"
+          test "$RUNNER_ARCH" = "$EXPECTED_RUNNER_ARCH"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          rustc --version --verbose
+          cargo --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run native release tests
+        run: cargo test --locked --release --all-targets --target "$NATIVE_TARGET" --jobs 2
+
+      - name: Build native release binary
+        run: cargo build --locked --release --bin ironvnc --target "$NATIVE_TARGET" --jobs 2
+
+      - name: Test native binary against isolated loopback RFB fixture
+        run: |
+          binary="target/$NATIVE_TARGET/release/ironvnc"
+          if [[ "$RUNNER_OS" = Windows ]]; then binary="$binary.exe"; fi
+          ${{ matrix.python }} scripts/rfb_fixture.py --binary "$binary"
+
+      - name: Smoke-test and package binary
+        env:
+          CI_VERIFICATION_COMPLETED: native-release-tests,loopback-rfb-fixture
+        run: ${{ matrix.python }} scripts/ci-package.py --target "$NATIVE_TARGET" --runner "${{ matrix.runner }}"
+
+      - name: Upload binary, documentation, and SHA256
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ironvnc-${{ matrix.target }}-${{ env.SOURCE_SHA }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

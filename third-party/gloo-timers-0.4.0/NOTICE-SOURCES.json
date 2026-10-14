@@ -1,0 +1,16 @@
+[
+  {
+    "filename": "LICENSE-APACHE",
+    "url": "https://raw.githubusercontent.com/rustwasm/gloo/c8feeb18bf5dde6b7aed80c749e1aef89b34fb52/LICENSE-APACHE",
+    "revision": "c8feeb18bf5dde6b7aed80c749e1aef89b34fb52",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2"
+  },
+  {
+    "filename": "LICENSE-MIT",
+    "url": "https://raw.githubusercontent.com/rustwasm/gloo/c8feeb18bf5dde6b7aed80c749e1aef89b34fb52/LICENSE-MIT",
+    "revision": "c8feeb18bf5dde6b7aed80c749e1aef89b34fb52",
+    "revision_kind": "published-crate-vcs-exact",
+    "sha256": "5a6f5443ea473f130adbdcf84254761d1292bc79759b5253915d4b5e7afbef66"
+  }
+]
