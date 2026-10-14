@@ -1,5 +1,5 @@
-use crate::connection::{ConnectionParams, VncConnection, VncEvent};
-use crate::sessions::{self, Session};
+use crate::connection::{ConnectionParams, Credentials, VncConnection, VncEvent};
+use crate::sessions::{self, Session, SessionIdentity};
 use crate::transfer::{RemoteEntry, TransferEvent, TransferParams, TransferSession};
 use egui::{Color32, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 
@@ -17,7 +17,10 @@ pub struct VncApp {
 
     // Password dialog — only shown when server explicitly requests auth
     show_password_dialog: bool,
+    pending_username: String,
     pending_password: String,
+    needs_username: bool,
+    needs_password: bool,
 
     // Sessions popup window
     show_sessions: bool,
@@ -26,11 +29,12 @@ pub struct VncApp {
     sf_name: String,
     sf_host: String,
     sf_port: String,
+    sf_username: String,
     sf_password: String,
     sf_editing: Option<usize>,
 
     // Input state
-    last_modifiers: Modifiers,
+    keyboard: RemoteKeyboard,
     last_mouse_pos: (u16, u16),
     clipboard: Option<arboard::Clipboard>,
 
@@ -40,7 +44,9 @@ pub struct VncApp {
     // Active VNC connection details (for the SFTP side-channel + auto-save)
     current_host: String,
     current_port: u16,
+    current_username: Option<String>,
     current_password: String,
+    current_source_session: Option<SessionIdentity>,
 
     // SFTP file-transfer panel (MobaXterm-style)
     transfer: Option<TransferSession>,
@@ -67,22 +73,28 @@ impl VncApp {
             desktop_name: String::new(),
             status_msg: "Not connected".to_string(),
             show_password_dialog: false,
+            pending_username: String::new(),
             pending_password: String::new(),
+            needs_username: false,
+            needs_password: false,
             show_sessions: false,
             sessions,
             session_selected: None,
             sf_name: String::new(),
             sf_host: String::new(),
             sf_port: "5900".to_string(),
+            sf_username: String::new(),
             sf_password: String::new(),
             sf_editing: None,
-            last_modifiers: Modifiers::default(),
+            keyboard: RemoteKeyboard::default(),
             last_mouse_pos: (0, 0),
             clipboard,
             first_frame: true,
             current_host: String::new(),
             current_port: 5900,
+            current_username: None,
             current_password: String::new(),
+            current_source_session: None,
             transfer: None,
             show_transfer: false,
             ssh_user: String::new(),
@@ -99,7 +111,7 @@ impl VncApp {
             } else {
                 format!("{}:{}", params.host, params.port)
             };
-            app.do_connect(params.host, params.port, params.password);
+            app.do_connect(params);
         }
 
         app
@@ -119,15 +131,26 @@ impl VncApp {
     }
 
     /// Start a connection immediately — no pre-connect dialog.
-    /// The server will tell us if it needs auth (via VncEvent::NeedPassword).
-    fn do_connect(&mut self, host: String, port: u16, password: Option<String>) {
+    /// The server will tell us which missing credentials it needs.
+    fn do_connect(&mut self, params: ConnectionParams) {
+        let ConnectionParams {
+            host,
+            port,
+            username,
+            password,
+            source_session,
+        } = params;
         self.status_msg = format!("Connecting to {}:{}…", host, port);
         self.desktop_name = String::new();
         self.show_password_dialog = false;
+        self.pending_username.clear();
         self.pending_password.clear();
+        self.keyboard = RemoteKeyboard::default();
         self.current_host = host.clone();
         self.current_port = port;
+        self.current_username = username.clone();
         self.current_password = password.clone().unwrap_or_default();
+        self.current_source_session = source_session.clone();
         // Remember the SSH username saved for this host, for the SFTP panel.
         self.ssh_user = self
             .sessions
@@ -138,7 +161,9 @@ impl VncApp {
         self.connection = Some(VncConnection::connect(ConnectionParams {
             host,
             port,
+            username,
             password,
+            source_session,
         }));
     }
 
@@ -165,6 +190,10 @@ impl VncApp {
     /// password) keeps credentials off the command line — the child loads the
     /// password from the saved sessions file.
     fn open_session_window(session: &Session) {
+        if !session.id.is_empty() {
+            Self::spawn_window(&["--session-id", &session.id]);
+            return;
+        }
         let key = if session.name.is_empty() {
             &session.host
         } else {
@@ -209,7 +238,10 @@ impl VncApp {
         self.status_msg = if self.desktop_name.is_empty() {
             format!("Connected  {}×{}", self.fb_width, self.fb_height)
         } else {
-            format!("{}  {}×{}", self.desktop_name, self.fb_width, self.fb_height)
+            format!(
+                "{}  {}×{}",
+                self.desktop_name, self.fb_width, self.fb_height
+            )
         };
     }
 
@@ -230,15 +262,9 @@ impl VncApp {
                     // (Re)allocate the full texture as black; partial updates
                     // paint into it as rectangles arrive.
                     if resized || self.texture.is_none() {
-                        let black = egui::ColorImage::new(
-                            [w as usize, h as usize],
-                            Color32::BLACK,
-                        );
-                        self.texture = Some(ctx.load_texture(
-                            "vnc-fb",
-                            black,
-                            TextureOptions::LINEAR,
-                        ));
+                        let black = egui::ColorImage::new([w as usize, h as usize], Color32::BLACK);
+                        self.texture =
+                            Some(ctx.load_texture("vnc-fb", black, TextureOptions::LINEAR));
                     }
                     self.update_status();
                 }
@@ -290,6 +316,20 @@ impl VncApp {
                 VncEvent::NeedPassword => {
                     self.status_msg = "Waiting for password…".to_string();
                     self.pending_password.clear();
+                    self.needs_username = false;
+                    self.needs_password = true;
+                    self.show_password_dialog = true;
+                }
+                VncEvent::NeedCredentials {
+                    username,
+                    needs_username,
+                    needs_password,
+                } => {
+                    self.status_msg = "Waiting for credentials…".to_string();
+                    self.pending_username = username.unwrap_or_default();
+                    self.pending_password.clear();
+                    self.needs_username = needs_username;
+                    self.needs_password = needs_password;
                     self.show_password_dialog = true;
                 }
                 VncEvent::Error(e) => {
@@ -297,18 +337,14 @@ impl VncApp {
                     self.connection = None;
                     self.texture = None;
                     self.show_password_dialog = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                        "IronVNC".to_string(),
-                    ));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Title("IronVNC".to_string()));
                 }
                 VncEvent::Disconnected => {
                     self.status_msg = "Disconnected".to_string();
                     self.connection = None;
                     self.texture = None;
                     self.show_password_dialog = false;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Title(
-                        "IronVNC".to_string(),
-                    ));
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Title("IronVNC".to_string()));
                 }
             }
         }
@@ -369,7 +405,11 @@ impl VncApp {
 
         // Path bar + navigation
         ui.horizontal(|ui| {
-            if ui.small_button("⬆").on_hover_text("Parent directory").clicked() {
+            if ui
+                .small_button("⬆")
+                .on_hover_text("Parent directory")
+                .clicked()
+            {
                 if let Some(parent) = parent_remote(&self.remote_path) {
                     if let Some(t) = &self.transfer {
                         t.list_dir(parent);
@@ -382,7 +422,11 @@ impl VncApp {
                     t.list_dir(p);
                 }
             }
-            if ui.small_button("＋dir").on_hover_text("New folder").clicked() {
+            if ui
+                .small_button("＋dir")
+                .on_hover_text("New folder")
+                .clicked()
+            {
                 let base = self.remote_path.clone();
                 let newdir = join_remote(&base, "new_folder");
                 if let Some(t) = &self.transfer {
@@ -390,7 +434,9 @@ impl VncApp {
                 }
             }
         });
-        ui.add(egui::Label::new(egui::RichText::new(&self.remote_path).small().monospace()).truncate());
+        ui.add(
+            egui::Label::new(egui::RichText::new(&self.remote_path).small().monospace()).truncate(),
+        );
         ui.separator();
 
         // Entry list
@@ -407,8 +453,7 @@ impl VncApp {
                     } else {
                         format!("{icon} {}  ({})", e.name, human_size(e.size))
                     };
-                    let resp =
-                        ui.selectable_label(self.remote_selected == Some(i), label);
+                    let resp = ui.selectable_label(self.remote_selected == Some(i), label);
                     if resp.clicked() {
                         self.remote_selected = Some(i);
                     }
@@ -426,7 +471,11 @@ impl VncApp {
         ui.separator();
         // Upload / download controls
         ui.horizontal(|ui| {
-            if ui.button("⬆ Upload…").on_hover_text("Pick local files to upload here").clicked() {
+            if ui
+                .button("⬆ Upload…")
+                .on_hover_text("Pick local files to upload here")
+                .clicked()
+            {
                 if let Some(files) = rfd::FileDialog::new().pick_files() {
                     let dir = self.remote_path.clone();
                     if let Some(t) = &self.transfer {
@@ -447,8 +496,8 @@ impl VncApp {
             {
                 if let Some(i) = self.remote_selected {
                     if let Some(e) = self.remote_entries.get(i).cloned() {
-                        let default_dir = dirs::download_dir()
-                            .unwrap_or_else(|| std::path::PathBuf::from("."));
+                        let default_dir =
+                            dirs::download_dir().unwrap_or_else(|| std::path::PathBuf::from("."));
                         if let Some(dir) = rfd::FileDialog::new()
                             .set_directory(&default_dir)
                             .pick_folder()
@@ -467,12 +516,19 @@ impl VncApp {
         ui.add(
             egui::Label::new(egui::RichText::new(&self.transfer_status).small().weak()).truncate(),
         );
-        ui.label(egui::RichText::new("Tip: drag files onto the window to upload").small().weak());
+        ui.label(
+            egui::RichText::new("Tip: drag files onto the window to upload")
+                .small()
+                .weak(),
+        );
     }
 
     fn render_ssh_login(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(format!("Connect to {} over SSH (port 22)", self.current_host));
+        ui.label(format!(
+            "Connect to {} over SSH (port 22)",
+            self.current_host
+        ));
         ui.label(
             egui::RichText::new("Use the machine's OS login — not the VNC password.")
                 .small()
@@ -556,7 +612,11 @@ impl VncApp {
                         conn.send_key(false, 0xFFE3);
                     }
                 }
-                let files_label = if self.show_transfer { "Files ◀" } else { "Files ▶" };
+                let files_label = if self.show_transfer {
+                    "Files ◀"
+                } else {
+                    "Files ▶"
+                };
                 if ui
                     .button(files_label)
                     .on_hover_text("SFTP file browser over SSH (drag & drop to upload)")
@@ -574,8 +634,7 @@ impl VncApp {
                         .desired_width(220.0),
                 );
 
-                let want_connect = (resp.lost_focus()
-                    && ui.input(|i| i.key_pressed(Key::Enter)))
+                let want_connect = (resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)))
                     || ui
                         .add_enabled(
                             !self.address_input.trim().is_empty(),
@@ -598,48 +657,60 @@ impl VncApp {
         });
     }
 
-    // ── Password dialog (shown only when server requests VNCAuth) ─────────────
+    // ── Authentication dialog (only missing fields requested by the server) ──
 
     fn render_password_dialog(&mut self, ctx: &egui::Context) {
         let mut wants_ok = false;
         let mut wants_cancel = false;
 
-        egui::Window::new("Password Required")
+        egui::Window::new("Credentials Required")
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO)
             .show(ctx, |ui| {
                 ui.set_min_width(280.0);
-                ui.label("This server requires a password.");
+                ui.label("Enter the credentials required by this server.");
                 ui.add_space(6.0);
 
-                ui.horizontal(|ui| {
-                    ui.label("Password:");
-                    let pw_resp = ui.add(
-                        egui::TextEdit::singleline(&mut self.pending_password)
-                            .password(true)
-                            .desired_width(180.0),
-                    );
-                    // Focus once on first show
-                    if !pw_resp.has_focus() && !pw_resp.gained_focus() {
-                        pw_resp.request_focus();
-                    }
-                });
+                if self.needs_username {
+                    ui.horizontal(|ui| {
+                        ui.label("Username:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.pending_username)
+                                .desired_width(180.0),
+                        );
+                    });
+                }
+                if self.needs_password {
+                    ui.horizontal(|ui| {
+                        ui.label("Password:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.pending_password)
+                                .password(true)
+                                .desired_width(180.0),
+                        );
+                    });
+                }
 
                 ui.add_space(6.0);
                 ui.horizontal(|ui| {
-                    wants_ok = ui.button("OK").clicked()
-                        || ui.input(|i| i.key_pressed(Key::Enter));
+                    wants_ok = ui.button("OK").clicked() || ui.input(|i| i.key_pressed(Key::Enter));
                     wants_cancel = ui.button("Cancel").clicked();
                 });
             });
 
         if wants_ok {
-            let pw = self.pending_password.clone();
-            // Remember the password so a successful connect can be auto-saved.
-            self.current_password = pw.clone();
+            if self.needs_username {
+                self.current_username = Some(self.pending_username.clone());
+            }
+            if self.needs_password {
+                self.current_password = self.pending_password.clone();
+            }
             if let Some(conn) = &self.connection {
-                conn.provide_password(pw);
+                conn.provide_credentials(Credentials {
+                    username: self.current_username.clone(),
+                    password: self.current_password.clone(),
+                });
             }
             self.show_password_dialog = false;
             self.status_msg = "Authenticating…".to_string();
@@ -656,28 +727,16 @@ impl VncApp {
         if self.current_host.is_empty() {
             return;
         }
-        let host = self.current_host.clone();
-        let port = self.current_port;
-        let pw = self.current_password.clone();
-
-        if let Some(s) = self
-            .sessions
-            .iter_mut()
-            .find(|s| s.host == host && s.port == port)
-        {
-            // Update a stored password only when we now have a (better) one.
-            if !pw.is_empty() && s.password != pw {
-                s.password = pw;
-                let _ = sessions::save(&self.sessions);
-            }
-        } else {
-            self.sessions.push(Session {
-                name: String::new(),
-                host,
-                port,
-                password: pw,
-                ssh_user: String::new(),
-            });
+        // Other session windows may have saved since this window was opened.
+        self.sessions = sessions::load();
+        if sessions::remember_connection(
+            &mut self.sessions,
+            &self.current_host,
+            self.current_port,
+            self.current_username.clone(),
+            &self.current_password,
+            self.current_source_session.as_ref(),
+        ) {
             let _ = sessions::save(&self.sessions);
         }
     }
@@ -736,6 +795,7 @@ impl VncApp {
                         self.sf_name.clear();
                         self.sf_host.clear();
                         self.sf_port = "5900".to_string();
+                        self.sf_username.clear();
                         self.sf_password.clear();
                         self.sf_editing = None;
                     }
@@ -758,16 +818,13 @@ impl VncApp {
                         ui.text_edit_singleline(&mut self.sf_host);
                         ui.end_row();
                         ui.label("Port");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.sf_port)
-                                .desired_width(70.0),
-                        );
+                        ui.add(egui::TextEdit::singleline(&mut self.sf_port).desired_width(70.0));
+                        ui.end_row();
+                        ui.label("VNC username (optional)");
+                        ui.text_edit_singleline(&mut self.sf_username);
                         ui.end_row();
                         ui.label("Password");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.sf_password)
-                                .password(true),
-                        );
+                        ui.add(egui::TextEdit::singleline(&mut self.sf_password).password(true));
                         ui.end_row();
                     });
 
@@ -796,6 +853,7 @@ impl VncApp {
                 self.sf_name = s.name.clone();
                 self.sf_host = s.host.clone();
                 self.sf_port = s.port.to_string();
+                self.sf_username = s.username.clone().unwrap_or_default();
                 self.sf_password = s.password.clone();
                 self.sf_editing = Some(i);
             }
@@ -824,9 +882,16 @@ impl VncApp {
             .map(|s| s.ssh_user.clone())
             .unwrap_or_default();
         let session = Session {
+            id: self
+                .sf_editing
+                .and_then(|i| self.sessions.get(i))
+                .map(|s| s.id.clone())
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(sessions::new_id),
             name: self.sf_name.trim().to_string(),
             host: self.sf_host.trim().to_string(),
             port: self.sf_port.parse().unwrap_or(5900),
+            username: (!self.sf_username.is_empty()).then(|| self.sf_username.clone()),
             password: self.sf_password.clone(),
             ssh_user,
         };
@@ -983,10 +1048,14 @@ impl VncApp {
                 if rect.contains(p) {
                     let painter = ui.painter();
                     let c = Color32::from_rgb(0, 200, 255);
-                    painter.line_segment([p - egui::vec2(7.0, 0.0), p + egui::vec2(7.0, 0.0)],
-                        egui::Stroke::new(1.5_f32, c));
-                    painter.line_segment([p - egui::vec2(0.0, 7.0), p + egui::vec2(0.0, 7.0)],
-                        egui::Stroke::new(1.5_f32, c));
+                    painter.line_segment(
+                        [p - egui::vec2(7.0, 0.0), p + egui::vec2(7.0, 0.0)],
+                        egui::Stroke::new(1.5_f32, c),
+                    );
+                    painter.line_segment(
+                        [p - egui::vec2(0.0, 7.0), p + egui::vec2(0.0, 7.0)],
+                        egui::Stroke::new(1.5_f32, c),
+                    );
                     painter.circle_stroke(p, 3.0, egui::Stroke::new(1.0_f32, c));
                 }
             }
@@ -1039,58 +1108,16 @@ impl VncApp {
         // ── Keyboard (only when the remote screen owns focus, so typing in the
         //    Sessions form or other UI fields doesn't leak to the server) ──
         if fb_focused {
-            let new_mods = ctx.input(|i| i.modifiers);
-            if new_mods != self.last_modifiers {
-                if new_mods.ctrl && !self.last_modifiers.ctrl {
-                    conn.send_key(true, 0xffe3);
-                } else if !new_mods.ctrl && self.last_modifiers.ctrl {
-                    conn.send_key(false, 0xffe3);
-                }
-                if new_mods.shift && !self.last_modifiers.shift {
-                    conn.send_key(true, 0xffe1);
-                } else if !new_mods.shift && self.last_modifiers.shift {
-                    conn.send_key(false, 0xffe1);
-                }
-                if new_mods.alt && !self.last_modifiers.alt {
-                    conn.send_key(true, 0xffe9);
-                } else if !new_mods.alt && self.last_modifiers.alt {
-                    conn.send_key(false, 0xffe9);
-                }
-                self.last_modifiers = new_mods;
+            let keyboard = &mut self.keyboard;
+            let events = ctx.input(|i| keyboard.translate(&i.events, i.modifiers));
+            for (down, keysym) in events {
+                conn.send_key(down, keysym);
             }
-
-            ctx.input(|i| {
-                for event in &i.events {
-                    match event {
-                        egui::Event::Key { key, pressed, .. } => {
-                            let sym = key_to_keysym(*key);
-                            if sym != 0 {
-                                conn.send_key(*pressed, sym);
-                            }
-                        }
-                        egui::Event::Text(text) => {
-                            for ch in text.chars() {
-                                conn.send_key(true, ch as u32);
-                                conn.send_key(false, ch as u32);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            });
-        } else if self.last_modifiers != Modifiers::default() {
-            // Focus left the remote screen while modifiers were held — release
-            // them on the server so they don't get stuck down.
-            if self.last_modifiers.ctrl {
-                conn.send_key(false, 0xffe3);
+        } else {
+            // Release held keys as well as modifiers when remote focus leaves.
+            for (down, keysym) in self.keyboard.release_all() {
+                conn.send_key(down, keysym);
             }
-            if self.last_modifiers.shift {
-                conn.send_key(false, 0xffe1);
-            }
-            if self.last_modifiers.alt {
-                conn.send_key(false, 0xffe9);
-            }
-            self.last_modifiers = Modifiers::default();
         }
     }
 }
@@ -1260,6 +1287,392 @@ fn key_to_keysym(key: Key) -> u32 {
         Key::F10 => 0xffc7,
         Key::F11 => 0xffc8,
         Key::F12 => 0xffc9,
+        Key::Space => b' ' as u32,
+        Key::Colon => b':' as u32,
+        Key::Comma => b',' as u32,
+        Key::Backslash => b'\\' as u32,
+        Key::Slash => b'/' as u32,
+        Key::Pipe => b'|' as u32,
+        Key::Questionmark => b'?' as u32,
+        Key::Exclamationmark => b'!' as u32,
+        Key::OpenBracket => b'[' as u32,
+        Key::CloseBracket => b']' as u32,
+        Key::OpenCurlyBracket => b'{' as u32,
+        Key::CloseCurlyBracket => b'}' as u32,
+        Key::Backtick => b'`' as u32,
+        Key::Minus => b'-' as u32,
+        Key::Period => b'.' as u32,
+        Key::Plus => b'+' as u32,
+        Key::Equals => b'=' as u32,
+        Key::Semicolon => b';' as u32,
+        Key::Quote => b'\'' as u32,
+        Key::Num0 => b'0' as u32,
+        Key::Num1 => b'1' as u32,
+        Key::Num2 => b'2' as u32,
+        Key::Num3 => b'3' as u32,
+        Key::Num4 => b'4' as u32,
+        Key::Num5 => b'5' as u32,
+        Key::Num6 => b'6' as u32,
+        Key::Num7 => b'7' as u32,
+        Key::Num8 => b'8' as u32,
+        Key::Num9 => b'9' as u32,
+        Key::A => b'a' as u32,
+        Key::B => b'b' as u32,
+        Key::C => b'c' as u32,
+        Key::D => b'd' as u32,
+        Key::E => b'e' as u32,
+        Key::F => b'f' as u32,
+        Key::G => b'g' as u32,
+        Key::H => b'h' as u32,
+        Key::I => b'i' as u32,
+        Key::J => b'j' as u32,
+        Key::K => b'k' as u32,
+        Key::L => b'l' as u32,
+        Key::M => b'm' as u32,
+        Key::N => b'n' as u32,
+        Key::O => b'o' as u32,
+        Key::P => b'p' as u32,
+        Key::Q => b'q' as u32,
+        Key::R => b'r' as u32,
+        Key::S => b's' as u32,
+        Key::T => b't' as u32,
+        Key::U => b'u' as u32,
+        Key::V => b'v' as u32,
+        Key::W => b'w' as u32,
+        Key::X => b'x' as u32,
+        Key::Y => b'y' as u32,
+        Key::Z => b'z' as u32,
         _ => 0,
+    }
+}
+
+fn char_to_keysym(ch: char) -> u32 {
+    let codepoint = ch as u32;
+    if codepoint <= 0xff {
+        codepoint
+    } else {
+        0x0100_0000 | codepoint
+    }
+}
+
+fn modifier_key_events(previous: Modifiers, current: Modifiers) -> Vec<(bool, u32)> {
+    [
+        (previous.ctrl, current.ctrl, 0xffe3),
+        (previous.shift, current.shift, 0xffe1),
+        (previous.alt, current.alt, 0xffe9),
+        (previous.mac_cmd, current.mac_cmd, 0xffe7),
+    ]
+    .into_iter()
+    .filter_map(|(was_down, is_down, keysym)| (was_down != is_down).then_some((is_down, keysym)))
+    .collect()
+}
+
+#[derive(Default)]
+struct RemoteKeyboard {
+    modifiers: Modifiers,
+    /// Remember the sent keysym so releasing modifiers/layout keys first
+    /// cannot leave a different keysym held on the remote host.
+    held_keys: Vec<(Key, u32)>,
+}
+
+impl RemoteKeyboard {
+    fn set_modifiers(&mut self, modifiers: Modifiers, output: &mut Vec<(bool, u32)>) {
+        output.extend(modifier_key_events(self.modifiers, modifiers));
+        self.modifiers = modifiers;
+    }
+
+    fn translate(&mut self, events: &[egui::Event], current: Modifiers) -> Vec<(bool, u32)> {
+        let mut output = Vec::new();
+        for event in events {
+            match event {
+                egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed,
+                    modifiers,
+                    ..
+                } => {
+                    self.set_modifiers(*modifiers, &mut output);
+                    let identity = physical_key.unwrap_or(*key);
+                    if *pressed {
+                        let keysym = key_to_keysym(*key);
+                        let command = modifiers.ctrl || modifiers.mac_cmd || modifiers.command;
+                        // Printable keys arrive through Text during ordinary
+                        // typing, and through Key only for Ctrl/Cmd shortcuts.
+                        if keysym != 0 && (keysym >= 0xff00 || command) {
+                            let keysym = if let Some((_, held)) =
+                                self.held_keys.iter().find(|(k, _)| *k == identity)
+                            {
+                                *held
+                            } else {
+                                self.held_keys.push((identity, keysym));
+                                keysym
+                            };
+                            output.push((true, keysym));
+                        }
+                    } else if let Some(index) =
+                        self.held_keys.iter().position(|(k, _)| *k == identity)
+                    {
+                        let (_, keysym) = self.held_keys.remove(index);
+                        output.push((false, keysym));
+                    }
+                }
+                egui::Event::Text(text) => {
+                    for ch in text.chars() {
+                        let keysym = char_to_keysym(ch);
+                        output.extend([(true, keysym), (false, keysym)]);
+                    }
+                }
+                egui::Event::Copy | egui::Event::Cut | egui::Event::Paste(_) => {
+                    let keysym = match event {
+                        egui::Event::Copy => b'c',
+                        egui::Event::Cut => b'x',
+                        _ => b'v',
+                    } as u32;
+                    // The semantic event has no modifiers. Prefer the live
+                    // command chord; dedicated clipboard keys use the native
+                    // primary shortcut. Never read/forward Paste's text.
+                    let modifiers = if current.ctrl || current.mac_cmd || current.command {
+                        current
+                    } else if self.modifiers.ctrl
+                        || self.modifiers.mac_cmd
+                        || self.modifiers.command
+                    {
+                        self.modifiers
+                    } else {
+                        Modifiers {
+                            ctrl: !cfg!(target_os = "macos"),
+                            mac_cmd: cfg!(target_os = "macos"),
+                            command: true,
+                            ..Modifiers::default()
+                        }
+                    };
+                    self.set_modifiers(modifiers, &mut output);
+                    output.extend([(true, keysym), (false, keysym)]);
+                    // egui-winit still emits the later Key release. It has no
+                    // matching held key here and is deliberately ignored.
+                }
+                _ => {}
+            }
+        }
+        self.set_modifiers(current, &mut output);
+        output
+    }
+
+    fn release_all(&mut self) -> Vec<(bool, u32)> {
+        let mut output = self
+            .held_keys
+            .drain(..)
+            .map(|(_, keysym)| (false, keysym))
+            .collect();
+        self.set_modifiers(Modifiers::default(), &mut output);
+        output
+    }
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    fn key_event(key: Key, pressed: bool, modifiers: Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: Some(key),
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+
+    fn command() -> Modifiers {
+        Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Modifiers::default()
+        }
+    }
+
+    #[test]
+    fn command_a_sends_letter_and_releases_it_after_command_is_up() {
+        let mut keyboard = RemoteKeyboard::default();
+        assert_eq!(
+            keyboard.translate(&[key_event(Key::A, true, command())], command()),
+            vec![(true, 0xffe7), (true, b'a' as u32)]
+        );
+        assert_eq!(
+            keyboard.translate(
+                &[key_event(Key::A, false, Modifiers::default())],
+                Modifiers::default()
+            ),
+            vec![(false, 0xffe7), (false, b'a' as u32)]
+        );
+        assert!(keyboard.release_all().is_empty());
+    }
+
+    #[test]
+    fn semantic_clipboard_shortcuts_send_only_command_key_taps() {
+        for (event, key, letter) in [
+            (egui::Event::Copy, Key::C, b'c'),
+            (egui::Event::Cut, Key::X, b'x'),
+            (
+                egui::Event::Paste("private local clipboard 🦀".to_string()),
+                Key::V,
+                b'v',
+            ),
+        ] {
+            let mut keyboard = RemoteKeyboard::default();
+            assert_eq!(
+                keyboard.translate(&[event], command()),
+                vec![
+                    (true, 0xffe7),
+                    (true, letter as u32),
+                    (false, letter as u32)
+                ]
+            );
+            // winit's release remains after its semantic press substitution.
+            assert!(keyboard
+                .translate(&[key_event(key, false, command())], command())
+                .is_empty());
+            assert_eq!(keyboard.release_all(), vec![(false, 0xffe7)]);
+        }
+    }
+
+    #[test]
+    fn control_clipboard_shortcuts_keep_control_semantics() {
+        let control = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::default()
+        };
+        let mut keyboard = RemoteKeyboard::default();
+        assert_eq!(
+            keyboard.translate(&[egui::Event::Copy], control),
+            vec![(true, 0xffe3), (true, b'c' as u32), (false, b'c' as u32)]
+        );
+        assert_eq!(keyboard.release_all(), vec![(false, 0xffe3)]);
+    }
+
+    #[test]
+    fn ordinary_key_plus_text_is_sent_once() {
+        let mut keyboard = RemoteKeyboard::default();
+        let modifiers = Modifiers::default();
+        let events = [
+            key_event(Key::A, true, modifiers),
+            egui::Event::Text("a".to_string()),
+            key_event(Key::A, false, modifiers),
+        ];
+        assert_eq!(
+            keyboard.translate(&events, modifiers),
+            vec![(true, b'a' as u32), (false, b'a' as u32)]
+        );
+        assert!(keyboard.release_all().is_empty());
+    }
+
+    #[test]
+    fn shortcuts_include_digits_and_punctuation_without_typing_them_twice() {
+        for (key, letter) in [
+            (Key::Num1, b'1'),
+            (Key::Minus, b'-'),
+            (Key::Quote, b'\''),
+            (Key::Plus, b'+'),
+            (Key::OpenBracket, b'['),
+        ] {
+            let mut keyboard = RemoteKeyboard::default();
+            assert_eq!(
+                keyboard.translate(
+                    &[
+                        key_event(key, true, command()),
+                        key_event(key, false, command())
+                    ],
+                    command()
+                ),
+                vec![
+                    (true, 0xffe7),
+                    (true, letter as u32),
+                    (false, letter as u32)
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn focus_loss_releases_held_shortcut_before_modifier() {
+        let mut keyboard = RemoteKeyboard::default();
+        keyboard.translate(&[key_event(Key::A, true, command())], command());
+        assert_eq!(
+            keyboard.release_all(),
+            vec![(false, b'a' as u32), (false, 0xffe7)]
+        );
+        assert!(keyboard.release_all().is_empty());
+    }
+
+    #[test]
+    fn punctuation_release_uses_the_original_keysym_after_shift_changes() {
+        let mut keyboard = RemoteKeyboard::default();
+        let shifted = Modifiers {
+            shift: true,
+            ..command()
+        };
+        let press = egui::Event::Key {
+            key: Key::Plus,
+            physical_key: Some(Key::Equals),
+            pressed: true,
+            repeat: false,
+            modifiers: shifted,
+        };
+        let release = egui::Event::Key {
+            key: Key::Equals,
+            physical_key: Some(Key::Equals),
+            pressed: false,
+            repeat: false,
+            modifiers: Modifiers::default(),
+        };
+        assert_eq!(
+            keyboard.translate(&[press], shifted),
+            vec![(true, 0xffe1), (true, 0xffe7), (true, b'+' as u32)]
+        );
+        assert_eq!(
+            keyboard.translate(&[release], Modifiers::default()),
+            vec![(false, 0xffe1), (false, 0xffe7), (false, b'+' as u32)]
+        );
+    }
+
+    #[test]
+    fn text_uses_latin1_and_unicode_keysyms() {
+        assert_eq!(char_to_keysym('A'), 0x41);
+        assert_eq!(char_to_keysym('é'), 0xe9);
+        assert_eq!(char_to_keysym('中'), 0x0100_4e2d);
+        assert_eq!(char_to_keysym('🦀'), 0x0101_f980);
+    }
+
+    #[test]
+    fn command_maps_to_meta_and_releases_on_focus_loss() {
+        let command = Modifiers {
+            mac_cmd: true,
+            command: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            modifier_key_events(Modifiers::default(), command),
+            vec![(true, 0xffe7)]
+        );
+        assert_eq!(modifier_key_events(command, command), vec![]);
+        assert_eq!(
+            modifier_key_events(command, Modifiers::default()),
+            vec![(false, 0xffe7)]
+        );
+    }
+
+    #[test]
+    fn control_command_alias_does_not_send_meta() {
+        let control = Modifiers {
+            ctrl: true,
+            command: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            modifier_key_events(Modifiers::default(), control),
+            vec![(true, 0xffe3)]
+        );
     }
 }

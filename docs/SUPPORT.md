@@ -38,12 +38,23 @@ python3 scripts/rfb_fixture.py --binary target/release/ironvnc
 The standard-library fixture checks 3.3/3.7/3.8 None and VNCAuth, a vendor-style
 003.889 banner, explicit true-colour negotiation, Raw/Tight/ZRLE frames, and
 rejection of malformed banners, unsupported ARD, oversized lengths and invalid
-rectangles. It never captures or connects to a real desktop.
+rectangles. Its 15 cases include a valid black frame and assert that headless
+mode does not send keyboard or pointer input. It never captures or connects to
+a real desktop.
 
 The optional RSA-AES fixture uses an already available Python `cryptography`
 installation; it is not a runtime dependency of IronVNC or an automatic package
 installation. Its independent protocol implementation tests synthetic RA2
 connections locally. See its `--help` for invocation.
+
+```sh
+python3 scripts/ra2_fixture.py --binary target/release/ironvnc --verbose
+```
+
+Its 20 cases cover all four RSA-AES security types, both credential subtypes,
+UTF-8 credentials, invalid subtypes and modified MACs. EAX is independently
+composed from CMAC/CTR and checked against three published known vectors.
+Post-authentication RFB fields are deliberately split across encrypted records.
 
 ## Limits
 
@@ -57,6 +68,10 @@ connections locally. See its `--help` for invocation.
   trust behavior is unchanged. Use only appropriately trusted endpoints.
 - VeNCrypt and Apple private protocols remain unsupported; see
   [PROTOCOL.md](PROTOCOL.md). There is no claim of complete security audit.
+- Command/Ctrl shortcuts use egui key and Copy/Cut/Paste events without
+  forwarding the Paste event's local text. If the native egui clipboard backend
+  cannot read any text, it may suppress the paste key-down entirely; this
+  upstream event limitation is not recoverable by the viewer's input layer.
 
 Per-commit results, artifact URLs, and merge evidence are recorded in the fork's
 pull request and its Actions run, so this document does not confuse one commit's

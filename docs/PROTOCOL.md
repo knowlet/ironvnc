@@ -17,6 +17,12 @@ Tight, ZRLE, and RSA-AES come from the community
 which [TigerVNC](https://tigervnc.org/) identifies as its protocol reference.
 This extension reference is not an IETF standard.
 
+The `003.889` compatibility mapping also follows observable behavior in the
+official [noVNC implementation](https://github.com/novnc/noVNC/blob/master/core/rfb.js).
+AES-256 RSA-AES random lengths follow the official
+[TigerVNC 1.15.0 server](https://github.com/TigerVNC/tigervnc/blob/v1.15.0/common/rfb/SSecurityRSAAES.cxx):
+32 bytes per peer, resolving an omission in the extension prose.
+
 VNC DES authentication follows the bit-reversed key convention in
 [verified RFC erratum 4951](https://www.rfc-editor.org/errata/eid4951).
 RA2 supports username/password subtype 1 and password-only subtype 2;

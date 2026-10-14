@@ -1,4 +1,5 @@
 pub mod client;
+pub mod clipboard;
 pub mod encoding;
 pub mod messages;
 pub mod ra2;

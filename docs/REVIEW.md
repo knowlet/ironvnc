@@ -66,5 +66,9 @@ pre-existing application. Changes remain under the project's dual license.
 - Standard clipboard bytes were decoded as UTF-8 instead of Latin-1. Extended
   UTF-8 clipboard negotiation is implemented separately with limits.
 - macOS Command and non-Latin-1 text require the correct RFB keysyms.
+- The final independent review additionally identified incomplete Command
+  shortcuts and stale in-flight connections replacing newly edited saved
+  credentials. Input events now preserve shortcut semantics, and credential
+  snapshots must still match before saving; label-only edits remain valid.
 
 Validation evidence and explicit unsupported areas are in [SUPPORT.md](SUPPORT.md).

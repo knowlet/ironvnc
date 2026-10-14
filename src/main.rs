@@ -15,7 +15,10 @@ use anyhow::Result;
 use clap::Parser;
 
 #[derive(Parser, Debug)]
-#[command(name = "ironvnc", about = "IronVNC — a free, open-source VNC viewer written in Rust")]
+#[command(
+    name = "ironvnc",
+    about = "IronVNC — a free, open-source VNC viewer written in Rust"
+)]
 struct Args {
     /// VNC server host
     #[arg(short = 'H', long)]
@@ -28,6 +31,10 @@ struct Args {
     /// VNC password
     #[arg(short = 'P', long)]
     password: Option<String>,
+
+    /// VNC username (for servers requesting username/password authentication).
+    #[arg(short = 'U', long)]
+    username: Option<String>,
 
     /// Headless test mode: connect, wait for the first framebuffer, report, exit.
     #[arg(long, default_value_t = false)]
@@ -44,6 +51,10 @@ struct Args {
     /// Open a saved session by name, in this window.
     #[arg(long)]
     session: Option<String>,
+
+    /// Internal selector for opening one saved session in a new window.
+    #[arg(long, hide = true, conflicts_with = "session")]
+    session_id: Option<String>,
 }
 
 fn main() -> Result<()> {
@@ -60,7 +71,7 @@ fn main() -> Result<()> {
         let host = args
             .host
             .ok_or_else(|| anyhow::anyhow!("--test requires --host"))?;
-        return headless_test(host, args.port, args.password);
+        return headless_test(host, args.port, args.username, args.password);
     }
 
     if args.sftp_test {
@@ -75,30 +86,46 @@ fn main() -> Result<()> {
 
     // Resolve the initial connection. `--session <name>` opens a saved session
     // (used when launching a session in its own window). Otherwise `--host`;
-    // if no password was given, auto-load it from a saved session matching
-    // host:port so passwords never travel on the command line.
-    let initial_connection = if let Some(name) = args.session.clone() {
-        sessions::load()
-            .into_iter()
-            .find(|s| s.name == name || s.host == name)
-            .map(|s| connection::ConnectionParams {
-                host: s.host,
-                port: s.port,
-                password: (!s.password.is_empty()).then_some(s.password),
-            })
+    // reuse saved credentials only when host:port and the optional username
+    // select a single saved session.
+    let saved_sessions = sessions::load();
+    let selected_session = if let Some(id) = args.session_id.as_deref() {
+        Some(sessions::find_by_id(&saved_sessions, id)?)
+    } else if let Some(name) = args.session.as_deref() {
+        Some(sessions::find_named(&saved_sessions, name)?)
+    } else {
+        None
+    };
+    let initial_connection = if let Some(saved) = selected_session {
+        Some(connection::ConnectionParams {
+            host: saved.host.clone(),
+            port: saved.port,
+            username: args.username.clone().or_else(|| saved.username.clone()),
+            password: args
+                .password
+                .clone()
+                .or_else(|| (!saved.password.is_empty()).then(|| saved.password.clone())),
+            source_session: Some(saved.identity()),
+        })
     } else {
         args.host.clone().map(|host| {
+            let saved =
+                sessions::for_endpoint(&saved_sessions, &host, args.port, args.username.as_deref());
+            let username = args
+                .username
+                .clone()
+                .or_else(|| saved.and_then(|s| s.username.clone()));
             let password = args.password.clone().or_else(|| {
-                sessions::load()
-                    .into_iter()
-                    .find(|s| s.host == host && s.port == args.port)
-                    .map(|s| s.password)
-                    .filter(|p| !p.is_empty())
+                saved
+                    .filter(|s| !s.password.is_empty())
+                    .map(|s| s.password.clone())
             });
             connection::ConnectionParams {
                 host,
                 port: args.port,
+                username,
                 password,
+                source_session: saved.map(|s| s.identity()),
             }
         })
     };
@@ -164,9 +191,14 @@ fn sftp_test(host: String, user: String, password: String) -> Result<()> {
 }
 
 /// Connect without a GUI, wait for the first framebuffer update, and report:
-/// desktop name/size and how much of the first frame is non-black (a fully
-/// black frame usually means a decode bug, not a working session).
-fn headless_test(host: String, port: u16, password: Option<String>) -> Result<()> {
+/// desktop name/size and how much of the first frame is non-black. Black frames
+/// are valid; this smoke test never injects remote input.
+fn headless_test(
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+) -> Result<()> {
     use connection::{VncConnection, VncEvent};
     use std::time::{Duration, Instant};
 
@@ -174,17 +206,14 @@ fn headless_test(host: String, port: u16, password: Option<String>) -> Result<()
     let conn = VncConnection::connect(connection::ConnectionParams {
         host,
         port,
+        username,
         password,
+        source_session: None,
     });
 
     let deadline = Instant::now() + Duration::from_secs(30);
-    let start = Instant::now();
     let mut got_size = None;
     let mut got_name: Option<String> = None;
-    let mut frames = 0u32;
-    let mut best_pct = 0usize;
-    let mut wiggled = false;
-    let mut cad_sent = false;
     let mut fb_buf: Vec<u8> = Vec::new();
 
     while Instant::now() < deadline {
@@ -202,65 +231,72 @@ fn headless_test(host: String, port: u16, password: Option<String>) -> Result<()
                 conn.disconnect();
                 std::process::exit(2);
             }
+            Ok(VncEvent::NeedCredentials {
+                needs_username,
+                needs_password,
+                ..
+            }) => {
+                println!("[test] FAIL: missing credentials (username: {needs_username}, password: {needs_password})");
+                conn.disconnect();
+                std::process::exit(2);
+            }
             Ok(VncEvent::FramebufferRects(rects)) => {
-                frames += 1;
                 // Apply rects into a local buffer to measure whole-screen content.
                 let (fw, fh) = got_size.unwrap_or((0, 0));
-                if fb_buf.len() != (fw * fh * 4) as usize {
-                    fb_buf = vec![0u8; (fw * fh * 4) as usize];
+                let Some(total) = (fw as usize).checked_mul(fh as usize) else {
+                    anyhow::bail!("Framebuffer dimensions exceed addressable memory");
+                };
+                let Some(frame_len) = total.checked_mul(4) else {
+                    anyhow::bail!("Framebuffer dimensions exceed addressable memory");
+                };
+                if fb_buf.len() != frame_len {
+                    fb_buf = vec![0u8; frame_len];
                 }
+                let mut valid_rect = false;
                 for r in &rects {
+                    if r.w == 0
+                        || r.h == 0
+                        || r.x.checked_add(r.w).is_none_or(|x| x > fw)
+                        || r.y.checked_add(r.h).is_none_or(|y| y > fh)
+                        || (r.w as usize)
+                            .checked_mul(r.h as usize)
+                            .and_then(|n| n.checked_mul(4))
+                            != Some(r.rgba.len())
+                    {
+                        continue;
+                    }
+                    valid_rect = true;
                     for row in 0..r.h {
-                        let src = (row * r.w * 4) as usize;
-                        let dst = (((r.y + row) * fw + r.x) * 4) as usize;
-                        let n = (r.w * 4) as usize;
+                        let src = row as usize * r.w as usize * 4;
+                        let dst = ((r.y + row) as usize * fw as usize + r.x as usize) * 4;
+                        let n = r.w as usize * 4;
                         if dst + n <= fb_buf.len() && src + n <= r.rgba.len() {
                             fb_buf[dst..dst + n].copy_from_slice(&r.rgba[src..src + n]);
                         }
                     }
                 }
+                if !valid_rect {
+                    continue;
+                }
                 let non_black = fb_buf
                     .chunks_exact(4)
                     .filter(|p| p[0] != 0 || p[1] != 0 || p[2] != 0)
                     .count();
-                let total = (fw * fh) as usize;
-                let pct = if total > 0 { non_black * 100 / total } else { 0 };
-                best_pct = best_pct.max(pct);
+                let pct = if total > 0 {
+                    non_black * 100 / total
+                } else {
+                    0
+                };
                 println!(
-                    "[test] frame {frames}: {fw}x{fh}, {non_black}/{total} non-black pixels ({pct}%)"
+                    "[test] frame 1: {fw}x{fh}, {non_black}/{total} non-black pixels ({pct}%)"
                 );
-
-                // PASS on any meaningful content: a full desktop is >1%, but a
-                // locked screen (clock/login box on black) may be only a few
-                // thousand pixels — still proof the decoder works.
-                if pct >= 1 || non_black > 1000 {
-                    println!(
-                        "[test] PASS: connected to {:?} ({}x{}), framebuffer has content \
-                         ({non_black} non-black px, {pct}%)",
-                        got_name.as_deref().unwrap_or("?"),
-                        got_size.map_or(0, |s| s.0),
-                        got_size.map_or(0, |s| s.1),
-                    );
-                    conn.disconnect();
-                    return Ok(());
-                }
-
-                // All-black frame: wiggle the mouse once to wake a blanked/
-                // sleeping remote display, then keep watching for content.
-                if !wiggled {
-                    if let Some((w, h)) = got_size {
-                        let (cx, cy) = ((w / 2) as u16, (h / 2) as u16);
-                        conn.send_pointer(0, cx, cy);
-                        conn.send_pointer(0, cx + 20, cy + 20);
-                        conn.send_pointer(0, cx, cy);
-                        // Shift tap: harmless, and wakes a sleeping display
-                        // more reliably than pointer motion.
-                        conn.send_key(true, 0xFFE1);
-                        conn.send_key(false, 0xFFE1);
-                        println!("[test] frame is black; sent mouse wiggle + shift tap to wake display");
-                        wiggled = true;
-                    }
-                }
+                println!(
+                    "[test] PASS: connected to {:?} ({fw}x{fh}), first framebuffer decoded \
+                     ({non_black} non-black px, {pct}%)",
+                    got_name.as_deref().unwrap_or("?"),
+                );
+                conn.disconnect();
+                return Ok(());
             }
             Ok(VncEvent::ClipboardText(_)) => {}
             Ok(VncEvent::Error(e)) => {
@@ -273,39 +309,45 @@ fn headless_test(host: String, port: u16, password: Option<String>) -> Result<()
             }
             Err(_) => {} // poll timeout, keep waiting
         }
-
-        // Time-based escalation: still black several seconds after connecting →
-        // a Windows box at the secure desktop with its display off needs
-        // Ctrl+Alt+Del (SAS) to wake and raise the login screen. Also click
-        // once — lock screens dismiss on click.
-        if wiggled && !cad_sent && best_pct == 0 && start.elapsed() > Duration::from_secs(5) {
-            if let Some((w, h)) = got_size {
-                let (cx, cy) = ((w / 2) as u16, (h / 2) as u16);
-                conn.send_pointer(1, cx, cy); // left button down
-                conn.send_pointer(0, cx, cy); // release
-                conn.send_key(true, 0xFFE3); // Ctrl
-                conn.send_key(true, 0xFFE9); // Alt
-                conn.send_key(true, 0xFFFF); // Delete
-                conn.send_key(false, 0xFFFF);
-                conn.send_key(false, 0xFFE9);
-                conn.send_key(false, 0xFFE3);
-                println!("[test] still black; sent click + Ctrl+Alt+Del to raise login screen");
-                cad_sent = true;
-            }
-        }
-    }
-
-    if frames > 0 {
-        println!(
-            "[test] CONNECTED to {:?}, {frames} frames received, but all frames are black \
-             (best {best_pct}% non-black). The protocol works; the remote screen itself \
-             appears to be blank/locked/asleep.",
-            got_name.as_deref().unwrap_or("?"),
-        );
-        conn.disconnect();
-        return Ok(());
     }
     println!("[test] FAIL: timed out after 30s with no frames");
     conn.disconnect();
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod cli_tests {
+    use super::*;
+
+    #[test]
+    fn vnc_username_and_ssh_user_are_distinct_options() {
+        let args = Args::try_parse_from([
+            "ironvnc",
+            "--test",
+            "-H",
+            "localhost",
+            "-U",
+            "vnc-user",
+            "--user",
+            "ssh-user",
+        ])
+        .unwrap();
+        assert_eq!(args.username.as_deref(), Some("vnc-user"));
+        assert_eq!(args.user.as_deref(), Some("ssh-user"));
+        assert!(args.test);
+    }
+
+    #[test]
+    fn session_id_selector_is_hidden_and_exclusive_with_session_name() {
+        let args = Args::try_parse_from(["ironvnc", "--session-id", "bob-id"]).unwrap();
+        assert_eq!(args.session_id.as_deref(), Some("bob-id"));
+        assert!(
+            Args::try_parse_from(["ironvnc", "--session-id", "bob-id", "--session", "Bob",])
+                .is_err()
+        );
+        let help = Args::try_parse_from(["ironvnc", "--help"])
+            .unwrap_err()
+            .to_string();
+        assert!(!help.contains("--session-id"));
+    }
 }
