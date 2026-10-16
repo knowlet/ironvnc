@@ -12,6 +12,7 @@ fn rect(encoding: i32, bounds: (u16, u16, u16, u16), payload: &[u8]) -> Vec<u8> 
         bytes.extend_from_slice(&value.to_be_bytes());
     }
     bytes.extend_from_slice(&encoding.to_be_bytes());
+    bytes.extend_from_slice(payload);
     bytes
 }
 
