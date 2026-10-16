@@ -183,12 +183,13 @@ impl VncClient {
                         "Framebuffer update has too many rectangles"
                     );
                     let mut update_pixels = 0u64;
+                    let mut resized = false;
 
                     // Collect the bounds of each drawn rectangle so we can send
                     // only those regions to the UI (partial texture updates).
                     let mut dirty: Vec<(u16, u16, u16, u16)> = Vec::with_capacity(n_rects as usize);
 
-                    for index in 0..n_rects {
+                    for _ in 0..n_rects {
                         let rx = stream.read_u16().await?;
                         let ry = stream.read_u16().await?;
                         let rw = stream.read_u16().await?;
@@ -249,15 +250,13 @@ impl VncClient {
                                 dirty.push((rx, ry, rw, rh));
                             }
                             enc::DESKTOP_SIZE => {
-                                ensure!(
-                                    index + 1 == n_rects,
-                                    "DesktopSize must be the last rectangle"
-                                );
+                                // DesktopSize may precede data for the new size (RFB 7.7.4).
+                                // Resize now so subsequent rectangles use the new bounds.
                                 validate_framebuffer_size(rw, rh)?;
                                 fb.resize(rw as u32, rh as u32);
                                 dirty.clear();
+                                resized = true;
                                 let _ = event_tx.send(VncEvent::DesktopSize(rw as u32, rh as u32));
-                                send_fb_update_request(&mut stream, false, 0, 0, rw, rh).await?;
                             }
                             enc::CURSOR => {
                                 // RichCursor pseudo-encoding: read and discard cursor image + bitmask.
@@ -295,9 +294,11 @@ impl VncClient {
                         let _ = event_tx.send(VncEvent::FramebufferRects(rects));
                     }
 
+                    // Resizing discards old pixels. Request one full refresh, only after
+                    // consuming the entire update, rather than also queuing an incremental.
                     send_fb_update_request(
                         &mut stream,
-                        true,
+                        !resized,
                         0,
                         0,
                         fb.width as u16,
@@ -440,6 +441,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod desktop_size;
+
     use super::*;
     use std::time::Duration;
     use tokio::net::TcpListener;
