@@ -18,6 +18,8 @@ use tracing::{debug, info, warn};
 const MAX_FRAMEBUFFER_PIXELS: u64 = 32 * 1024 * 1024;
 const MAX_DESKTOP_NAME_BYTES: u32 = 1024 * 1024;
 const MAX_UPDATE_RECTANGLES: u16 = 16_384;
+// Bound allocation and UI-event churn separately from decoded pixel work.
+const MAX_UPDATE_RESIZES: u16 = 16;
 
 pub struct VncClient;
 
@@ -184,6 +186,8 @@ impl VncClient {
                     );
                     let mut update_pixels = 0u64;
                     let mut resized = false;
+                    let mut resize_count = 0u16;
+                    let mut resize_pixels = 0u64;
 
                     // Collect the bounds of each drawn rectangle so we can send
                     // only those regions to the UI (partial texture updates).
@@ -253,6 +257,16 @@ impl VncClient {
                                 // DesktopSize may precede data for the new size (RFB 7.7.4).
                                 // Resize now so subsequent rectangles use the new bounds.
                                 validate_framebuffer_size(rw, rh)?;
+                                resize_count += 1;
+                                ensure!(
+                                    resize_count <= MAX_UPDATE_RESIZES,
+                                    "Framebuffer update has too many DesktopSize rectangles"
+                                );
+                                resize_pixels += u64::from(rw) * u64::from(rh);
+                                ensure!(
+                                    resize_pixels <= MAX_FRAMEBUFFER_PIXELS,
+                                    "Framebuffer update exceeds resize pixel budget"
+                                );
                                 fb.resize(rw as u32, rh as u32);
                                 dirty.clear();
                                 resized = true;
