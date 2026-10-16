@@ -433,7 +433,10 @@ async fn desktop_size_bounds_resize_count_before_allocation_or_events() {
 #[tokio::test]
 async fn desktop_size_bounds_cumulative_resize_pixels_separately_from_data() {
     let side = 4096u16;
-    assert_eq!(2 * u64::from(side) * u64::from(side), MAX_FRAMEBUFFER_PIXELS);
+    assert_eq!(
+        2 * u64::from(side) * u64::from(side),
+        MAX_FRAMEBUFFER_PIXELS
+    );
     let events = exchange(vec![
         (
             vec![update(vec![
@@ -452,7 +455,10 @@ async fn desktop_size_bounds_cumulative_resize_pixels_separately_from_data() {
     assert_eq!(events.len(), 5);
     assert_size(&events[0], u32::from(side), u32::from(side));
     assert_size(&events[1], u32::from(side), u32::from(side));
-    assert_pixels(&events[2], &[(u32::from(side - 1), u32::from(side - 1), RED)]);
+    assert_pixels(
+        &events[2],
+        &[(u32::from(side - 1), u32::from(side - 1), RED)],
+    );
     assert_size(&events[3], 1, 1);
     assert_pixels(&events[4], &[(0, 0, GREEN)]);
 
