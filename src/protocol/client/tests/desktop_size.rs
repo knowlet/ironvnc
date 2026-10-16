@@ -12,7 +12,6 @@ fn rect(encoding: i32, bounds: (u16, u16, u16, u16), payload: &[u8]) -> Vec<u8> 
         bytes.extend_from_slice(&value.to_be_bytes());
     }
     bytes.extend_from_slice(&encoding.to_be_bytes());
-    bytes.extend_from_slice(payload);
     bytes
 }
 
@@ -401,4 +400,70 @@ async fn desktop_size_truncated_raw_does_not_publish_or_request_partial_update()
     let events = reject(bytes, "", true).await;
     assert_eq!(events.len(), 1);
     assert_size(&events[0], 4, 2);
+}
+
+#[tokio::test]
+async fn desktop_size_bounds_resize_count_before_allocation_or_events() {
+    let rectangles: Vec<_> = (0..MAX_UPDATE_RESIZES).map(|_| resize(1, 1)).collect();
+    // Exactly the allowed count succeeds, and the next update gets a new budget.
+    let events = exchange(vec![
+        (vec![update(rectangles.clone())], request(false, 1, 1)),
+        (vec![update(rectangles)], request(false, 1, 1)),
+    ])
+    .await;
+    assert_eq!(events.len(), 2 * usize::from(MAX_UPDATE_RESIZES));
+    for event in &events {
+        assert_size(event, 1, 1);
+    }
+
+    let events = reject(
+        update((0..=MAX_UPDATE_RESIZES).map(|_| resize(1, 1)).collect()),
+        "Framebuffer update has too many DesktopSize rectangles",
+        false,
+    )
+    .await;
+    // The over-budget marker must not emit a UI event or trigger a request.
+    assert_eq!(events.len(), usize::from(MAX_UPDATE_RESIZES));
+    for event in &events {
+        assert_size(event, 1, 1);
+    }
+}
+
+#[tokio::test]
+async fn desktop_size_bounds_cumulative_resize_pixels_separately_from_data() {
+    let side = 4096u16;
+    assert_eq!(2 * u64::from(side) * u64::from(side), MAX_FRAMEBUFFER_PIXELS);
+    let events = exchange(vec![
+        (
+            vec![update(vec![
+                resize(side, side),
+                resize(side, side),
+                pixel(side - 1, side - 1, RED),
+            ])],
+            request(false, side, side),
+        ),
+        (
+            vec![update(vec![resize(1, 1), pixel(0, 0, GREEN)])],
+            request(false, 1, 1),
+        ),
+    ])
+    .await;
+    assert_eq!(events.len(), 5);
+    assert_size(&events[0], u32::from(side), u32::from(side));
+    assert_size(&events[1], u32::from(side), u32::from(side));
+    assert_pixels(&events[2], &[(u32::from(side - 1), u32::from(side - 1), RED)]);
+    assert_size(&events[3], 1, 1);
+    assert_pixels(&events[4], &[(0, 0, GREEN)]);
+
+    let events = reject(
+        update(vec![resize(side, side), resize(side, side), resize(1, 1)]),
+        "Framebuffer update exceeds resize pixel budget",
+        false,
+    )
+    .await;
+    // Reject before reallocating or publishing the final 1x1 size.
+    assert_eq!(events.len(), 2);
+    for event in &events {
+        assert_size(event, u32::from(side), u32::from(side));
+    }
 }
