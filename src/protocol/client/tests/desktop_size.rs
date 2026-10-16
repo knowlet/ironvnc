@@ -157,7 +157,11 @@ async fn desktop_size_alone_or_last_discards_old_dirty_rectangles() {
 async fn desktop_size_first_decodes_raw_using_new_width_height_and_stride() {
     let events = exchange(vec![
         (
-            vec![update(vec![resize(4, 2), pixel(3, 1, RED), pixel(2, 1, BLUE)])],
+            vec![update(vec![
+                resize(4, 2),
+                pixel(3, 1, RED),
+                pixel(2, 1, BLUE),
+            ])],
             request(false, 4, 2),
         ),
         (vec![update(vec![pixel(3, 1, GREEN)])], request(true, 4, 2)),
@@ -173,7 +177,11 @@ async fn desktop_size_first_decodes_raw_using_new_width_height_and_stride() {
 async fn desktop_size_in_middle_keeps_only_pixels_after_shrink() {
     let events = exchange(vec![
         (
-            vec![update(vec![pixel(1, 0, RED), resize(1, 1), pixel(0, 0, GREEN)])],
+            vec![update(vec![
+                pixel(1, 0, RED),
+                resize(1, 1),
+                pixel(0, 0, GREEN),
+            ])],
             request(false, 1, 1),
         ),
         (vec![update(vec![pixel(0, 0, BLUE)])], request(true, 1, 1)),
@@ -330,7 +338,13 @@ async fn reject(packet: Vec<u8>, expected: &str, truncate: bool) -> Vec<VncEvent
 
 #[tokio::test]
 async fn desktop_size_rejects_invalid_new_bounds_before_all_decoder_payloads() {
-    for encoding in [enc::RAW, enc::COPY_RECT, enc::HEXTILE, enc::TIGHT, enc::ZRLE] {
+    for encoding in [
+        enc::RAW,
+        enc::COPY_RECT,
+        enc::HEXTILE,
+        enc::TIGHT,
+        enc::ZRLE,
+    ] {
         for bounds in [
             (1, 0, 1, 1), // valid in the old 2x1 framebuffer, invalid after shrink
             (0, 1, 1, 1),
