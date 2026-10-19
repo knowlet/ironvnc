@@ -114,3 +114,96 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
+
+  publish-nightly:
+    name: Publish verified Nightly prerelease
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [native]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download all six validated native artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: ironvnc-*-${{ github.sha }}
+          path: dist
+          merge-multiple: true
+
+      - name: Verify complete packages, hashes, and source provenance
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          sha = os.environ["GITHUB_SHA"]
+          targets = [
+              "x86_64-unknown-linux-gnu",
+              "aarch64-unknown-linux-gnu",
+              "x86_64-apple-darwin",
+              "aarch64-apple-darwin",
+              "x86_64-pc-windows-msvc",
+              "aarch64-pc-windows-msvc",
+          ]
+          directory = Path("dist")
+          expected = set()
+          for target in targets:
+              package = f"ironvnc-{target}-{sha[:12]}"
+              suffix = ".zip" if "windows" in target else ".tar.gz"
+              archive = directory / (package + suffix)
+              checksum = directory / (archive.name + ".sha256")
+              expected.update((archive.name, checksum.name))
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              if checksum.read_text(encoding="utf-8") != f"{digest}  {archive.name}\n":
+                  raise ValueError(f"SHA256 mismatch: {archive}")
+              manifest_name = f"{package}/BUILD-INFO.json"
+              if suffix == ".zip":
+                  with zipfile.ZipFile(archive) as contents:
+                      manifest = json.loads(contents.read(manifest_name))
+              else:
+                  with tarfile.open(archive, "r:gz") as contents:
+                      with contents.extractfile(manifest_name) as manifest_file:
+                          manifest = json.load(manifest_file)
+              if manifest["source_commit"] != sha or manifest["target"] != target:
+                  raise ValueError(f"Unexpected source or architecture: {archive}")
+              if set(manifest["prior_ci_verification"]) != {"native-release-tests", "loopback-rfb-fixture"}:
+                  raise ValueError(f"Missing native tests: {archive}")
+              if manifest["missing_third_party_notice_documents"] != 0:
+                  raise ValueError(f"Incomplete license notices: {archive}")
+          actual = {path.name for path in directory.iterdir() if path.is_file()}
+          if actual != expected:
+              raise ValueError(f"Missing or unexpected release assets: {sorted(expected ^ actual)}")
+          print(f"Verified {len(targets)} native packages and {len(expected)} release assets for {sha}")
+          PY
+
+      - name: Publish immutable Nightly prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="nightly-${GITHUB_SHA}"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            if [[ "$(gh release view "$tag" --json isDraft --jq '.isDraft')" != true ]]; then
+              echo "Existing published Nightly $tag is immutable; skipping upload."
+              exit 0
+            fi
+          else
+            gh release create "$tag" \
+              --draft --prerelease --target "$GITHUB_SHA" \
+              --title "Nightly $(date -u +%Y-%m-%d) (${GITHUB_SHA:0:12})" \
+              --notes "Automated main-branch prerelease from commit $GITHUB_SHA. All six native release builds, tests, and packaged archives passed CI. Binaries are unsigned and unnotarized. See https://github.com/${GITHUB_REPOSITORY}/blob/main/docs/SUPPORT.md for verification limits."
+          fi
+          gh release upload "$tag" dist/* --clobber
+          find dist -maxdepth 1 -type f -printf '%f\n' | sort > expected-assets.txt
+          gh release view "$tag" --json assets --jq '.assets[].name' | sort > uploaded-assets.txt
+          diff -u expected-assets.txt uploaded-assets.txt
+          gh release edit "$tag" --draft=false --prerelease
+          echo "Nightly: https://github.com/${GITHUB_REPOSITORY}/releases/tag/${tag}" >> "$GITHUB_STEP_SUMMARY"

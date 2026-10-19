@@ -1,10 +1,20 @@
 # Build and verification matrix
 
-Artifacts are produced by the `Native binaries` GitHub Actions workflow, retained
-for 14 days, without creating releases or deployments. Each job checks its Rust
-host triple and runner architecture, builds the exact source head, runs release
-tests, exercises the actual binary against synthetic loopback RFB servers, and
-checks `--help`. Cross-compilation is not counted as native execution.
+The `Native binaries` GitHub Actions workflow builds all six native targets on
+pull requests and pushes to `main`. Per-run Actions artifacts are retained for
+14 days. Each job checks its Rust host triple and runner architecture, builds
+the exact source head, runs release tests, exercises the actual binary against
+synthetic loopback RFB servers, and checks `--help`. Cross-compilation is not
+counted as native execution.
+
+After all six jobs succeed for a `main` push, the publication job verifies the
+complete set of target archives and SHA256 files, checks the embedded build
+manifests for the exact commit, target and CI checks, and publishes a GitHub
+[Nightly prerelease](https://github.com/knowlet/ironvnc/releases) tagged
+`nightly-<full-commit-SHA>`. These tags/releases are not overwritten after
+publication; interrupted draft publications can be retried. Release assets
+remain available independently of Actions' 14-day artifact retention. Nightly
+is triggered by successful `main` pushes, not by a scheduled daily build.
 
 | Runner | Native target | Package |
 | --- | --- | --- |
