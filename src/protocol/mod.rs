@@ -5,6 +5,7 @@ pub mod encoding;
 pub mod messages;
 pub mod ra2;
 pub mod security;
+pub mod text_input;
 
 /// Object-safe alias for a bidirectional async stream. The security handshake
 /// may replace the raw TCP stream with an AES-encrypted channel (RA2), so the

@@ -148,12 +148,31 @@ impl VncClient {
                     }
                     VncCommand::SetClipboard(text) => {
                         // Invalid local text must not terminate a working session.
-                        if let Err(error) = clipboard.send_local(&mut stream, text).await {
-                            if error.downcast_ref::<std::io::Error>().is_some() {
-                                return Err(error);
+                        match clipboard.send_local(&mut stream, text).await {
+                            Ok(()) => {
+                                let _ = event_tx.send(VncEvent::ClipboardStatus {
+                                    message: "Clipboard transfer offered to the server".to_string(),
+                                    is_error: false,
+                                });
                             }
-                            warn!("Cannot send clipboard: {error}");
+                            Err(error) => {
+                                if error.downcast_ref::<std::io::Error>().is_some() {
+                                    return Err(error);
+                                }
+                                warn!("Cannot send clipboard: {error}");
+                                let _ = event_tx.send(VncEvent::ClipboardStatus {
+                                    message: format!("Cannot send clipboard: {error}"),
+                                    is_error: true,
+                                });
+                            }
                         }
+                    }
+                    VncCommand::TypeText(text) => {
+                        stream.write_all(&text.wire_bytes()).await?;
+                        let _ = event_tx.send(VncEvent::ClipboardStatus {
+                            message: format!("Sent {} text key taps to the server", text.len()),
+                            is_error: false,
+                        });
                     }
                     // ProvidePassword is only consumed during security negotiation;
                     // ignore any stray commands that arrive after auth completes.
@@ -456,6 +475,7 @@ where
 #[cfg(test)]
 mod tests {
     mod desktop_size;
+    mod text_input;
 
     use super::*;
     use std::time::Duration;

@@ -1,4 +1,5 @@
 use crate::connection::{ConnectionParams, Credentials, VncConnection, VncEvent};
+use crate::protocol::text_input::{char_to_keysym, TypedText};
 use crate::sessions::{self, Session, SessionIdentity};
 use crate::transfer::{RemoteEntry, TransferEvent, TransferParams, TransferSession};
 use egui::{Color32, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Vec2};
@@ -37,6 +38,7 @@ pub struct VncApp {
     keyboard: RemoteKeyboard,
     last_mouse_pos: (u16, u16),
     clipboard: Option<arboard::Clipboard>,
+    focus_remote_after_paste: bool,
 
     // One-time window sizing
     first_frame: bool,
@@ -61,8 +63,11 @@ pub struct VncApp {
 
 impl VncApp {
     pub fn new(_cc: &eframe::CreationContext<'_>, initial: Option<ConnectionParams>) -> Self {
+        Self::from_initial(initial)
+    }
+
+    fn from_initial(initial: Option<ConnectionParams>) -> Self {
         let sessions = sessions::load();
-        let clipboard = arboard::Clipboard::new().ok();
 
         let mut app = Self {
             address_input: String::new(),
@@ -88,7 +93,8 @@ impl VncApp {
             sf_editing: None,
             keyboard: RemoteKeyboard::default(),
             last_mouse_pos: (0, 0),
-            clipboard,
+            clipboard: None,
+            focus_remote_after_paste: false,
             first_frame: true,
             current_host: String::new(),
             current_port: 5900,
@@ -146,6 +152,7 @@ impl VncApp {
         self.pending_username.clear();
         self.pending_password.clear();
         self.keyboard = RemoteKeyboard::default();
+        self.focus_remote_after_paste = false;
         self.current_host = host.clone();
         self.current_port = port;
         self.current_username = username.clone();
@@ -228,6 +235,7 @@ impl VncApp {
         self.connection = None;
         self.texture = None;
         self.show_password_dialog = false;
+        self.focus_remote_after_paste = false;
         self.status_msg = "Disconnected".to_string();
         self.desktop_name = String::new();
         self.close_transfer();
@@ -243,6 +251,56 @@ impl VncApp {
                 self.desktop_name, self.fb_width, self.fb_height
             )
         };
+    }
+
+    fn local_clipboard(&mut self) -> Result<&mut arboard::Clipboard, String> {
+        // Retry on an explicit action if a clipboard backend was unavailable.
+        if self.clipboard.is_none() {
+            self.clipboard = Some(
+                arboard::Clipboard::new()
+                    .map_err(|error| format!("Cannot access the local clipboard: {error}"))?,
+            );
+        }
+        Ok(self.clipboard.as_mut().unwrap())
+    }
+
+    fn clipboard_text(&mut self) -> Result<String, String> {
+        let text = self
+            .local_clipboard()?
+            .get_text()
+            .map_err(|error| format!("Cannot read text from the local clipboard: {error}"))?;
+        if text.is_empty() {
+            return Err("The local clipboard contains no text".to_string());
+        }
+        Ok(text)
+    }
+
+    fn paste_text(&mut self, text: &str) -> Result<(), String> {
+        if !self.can_paste() {
+            return Err(
+                "Wait for the remote desktop and close local dialogs before pasting".into(),
+            );
+        }
+        let conn = self
+            .connection
+            .as_ref()
+            .ok_or_else(|| "Not connected to a VNC server".to_string())?;
+        // Validate the entire text before releasing keys or sending any input.
+        let text = TypedText::new(text).map_err(|error| error.to_string())?;
+        for (down, keysym) in self.keyboard.release_all() {
+            conn.send_key(down, keysym);
+        }
+        conn.type_text(text)?;
+        self.focus_remote_after_paste = true;
+        self.status_msg = "Sending clipboard text for typing…".to_string();
+        Ok(())
+    }
+
+    fn can_paste(&self) -> bool {
+        self.connection.is_some()
+            && self.texture.is_some()
+            && !self.show_password_dialog
+            && !self.show_sessions
     }
 
     // ── Event processing ──────────────────────────────────────────────────────
@@ -309,9 +367,20 @@ impl VncApp {
                     ctx.request_repaint();
                 }
                 VncEvent::ClipboardText(text) => {
-                    if let Some(cb) = &mut self.clipboard {
-                        let _ = cb.set_text(text);
+                    let result = self.local_clipboard().and_then(|cb| {
+                        cb.set_text(text)
+                            .map_err(|error| format!("Cannot update the local clipboard: {error}"))
+                    });
+                    if let Err(error) = result {
+                        self.status_msg = format!("Error: {error}");
                     }
+                }
+                VncEvent::ClipboardStatus { message, is_error } => {
+                    self.status_msg = if is_error {
+                        format!("Error: {message}")
+                    } else {
+                        message
+                    };
                 }
                 VncEvent::NeedPassword => {
                     self.status_msg = "Waiting for password…".to_string();
@@ -337,6 +406,7 @@ impl VncApp {
                     self.connection = None;
                     self.texture = None;
                     self.show_password_dialog = false;
+                    self.focus_remote_after_paste = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title("IronVNC".to_string()));
                 }
                 VncEvent::Disconnected => {
@@ -344,6 +414,7 @@ impl VncApp {
                     self.connection = None;
                     self.texture = None;
                     self.show_password_dialog = false;
+                    self.focus_remote_after_paste = false;
                     ctx.send_viewport_cmd(egui::ViewportCommand::Title("IronVNC".to_string()));
                 }
             }
@@ -587,14 +658,45 @@ impl VncApp {
                 if ui.button("Disconnect").clicked() {
                     self.disconnect(ctx);
                 }
+                // A connection object also exists while authentication is pending.
+                // Do not queue text that could be typed later after login.
+                let can_paste = self.can_paste();
                 if ui
-                    .button("Paste →VNC")
-                    .on_hover_text("Send clipboard text to VNC server")
+                    .add_enabled(can_paste, egui::Button::new("Paste text →VNC"))
+                    .on_hover_text(
+                        "Type local clipboard text into the remote app (up to 64 KiB). \
+                         Works without clipboard sharing. Line breaks press Enter; tabs press Tab.",
+                    )
                     .clicked()
                 {
-                    let text = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok());
-                    if let (Some(text), Some(conn)) = (text, &self.connection) {
-                        conn.send_clipboard(text);
+                    let result = self
+                        .clipboard_text()
+                        .and_then(|text| self.paste_text(&text));
+                    if let Err(error) = result {
+                        self.status_msg = format!("Error: {error}");
+                    }
+                }
+                if ui
+                    .add_enabled(can_paste, egui::Button::new("Sync clipboard"))
+                    .on_hover_text(
+                        "Offer local clipboard text to a server that supports clipboard sharing. \
+                         Then paste in the remote app. Native macOS servers may ignore this; \
+                         use Paste text instead.",
+                    )
+                    .clicked()
+                {
+                    let result = self.clipboard_text().and_then(|text| {
+                        self.connection
+                            .as_ref()
+                            .ok_or_else(|| "Not connected to a VNC server".to_string())?
+                            .send_clipboard(text)
+                    });
+                    match result {
+                        Ok(()) => {
+                            self.status_msg = "Requesting clipboard sync…".to_string();
+                            self.focus_remote_after_paste = true;
+                        }
+                        Err(error) => self.status_msg = format!("Error: {error}"),
                     }
                 }
                 if ui
@@ -1011,12 +1113,13 @@ impl VncApp {
         // the arrow keys, and Escape — are sent to the server instead of driving
         // egui's own widget navigation. Grab focus on click, and auto-grab when
         // connected and nothing else (e.g. a dialog's text field) owns it.
-        if response.clicked() {
+        let restoring_paste_focus = std::mem::take(&mut self.focus_remote_after_paste);
+        if response.clicked() || restoring_paste_focus {
             response.request_focus();
         } else if self.connection.is_some() && ctx.memory(|m| m.focused().is_none()) {
             response.request_focus();
         }
-        let fb_focused = response.has_focus();
+        let fb_focused = response.has_focus() && ctx.input(|i| i.focused);
         if fb_focused {
             ui.memory_mut(|m| {
                 m.set_focus_lock_filter(
@@ -1107,13 +1210,15 @@ impl VncApp {
 
         // ── Keyboard (only when the remote screen owns focus, so typing in the
         //    Sessions form or other UI fields doesn't leak to the server) ──
-        if fb_focused {
+        if fb_focused && !restoring_paste_focus {
             let keyboard = &mut self.keyboard;
             let events = ctx.input(|i| keyboard.translate(&i.events, i.modifiers));
             for (down, keysym) in events {
                 conn.send_key(down, keysym);
             }
         } else {
+            // The toolbar can be activated with Enter/Space. Its activation
+            // frame belongs to the local UI, even after restoring remote focus.
             // Release held keys as well as modifiers when remote focus leaves.
             for (down, keysym) in self.keyboard.release_all() {
                 conn.send_key(down, keysym);
@@ -1346,15 +1451,6 @@ fn key_to_keysym(key: Key) -> u32 {
     }
 }
 
-fn char_to_keysym(ch: char) -> u32 {
-    let codepoint = ch as u32;
-    if codepoint <= 0xff {
-        codepoint
-    } else {
-        0x0100_0000 | codepoint
-    }
-}
-
 fn modifier_key_events(previous: Modifiers, current: Modifiers) -> Vec<(bool, u32)> {
     [
         (previous.ctrl, current.ctrl, 0xffe3),
@@ -1473,6 +1569,129 @@ impl RemoteKeyboard {
 #[cfg(test)]
 mod input_tests {
     use super::*;
+    use crate::connection::VncCommand;
+
+    fn connected_app(ctx: &egui::Context) -> (VncApp, crossbeam_channel::Receiver<VncCommand>) {
+        let mut app = VncApp::from_initial(None);
+        let (_, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        app.connection = Some(VncConnection { event_rx, cmd_tx });
+        app.texture = Some(ctx.load_texture(
+            "paste-test",
+            egui::ColorImage::new([2, 2], Color32::BLACK),
+            TextureOptions::NEAREST,
+        ));
+        (app, cmd_rx)
+    }
+
+    #[test]
+    fn toolbar_paste_releases_held_keys_and_modifiers_before_one_text_command() {
+        let ctx = egui::Context::default();
+        let (mut app, commands) = connected_app(&ctx);
+        let held = Modifiers {
+            ctrl: true,
+            shift: true,
+            alt: true,
+            mac_cmd: true,
+            command: true,
+        };
+        app.keyboard
+            .translate(&[key_event(Key::A, true, held)], held);
+        app.paste_text("é中🙂\r\n\t").unwrap();
+        for expected in [b'a' as u32, 0xffe3, 0xffe1, 0xffe9, 0xffe7] {
+            assert!(matches!(
+                commands.try_recv().unwrap(),
+                VncCommand::KeyEvent { down: false, keysym } if keysym == expected
+            ));
+        }
+        assert!(matches!(
+            commands.try_recv().unwrap(),
+            VncCommand::TypeText(_)
+        ));
+        assert!(commands.is_empty());
+        assert!(app.keyboard.release_all().is_empty());
+        assert!(app.focus_remote_after_paste);
+    }
+
+    #[test]
+    fn invalid_toolbar_paste_preserves_keyboard_and_sends_nothing() {
+        let ctx = egui::Context::default();
+        let (mut app, commands) = connected_app(&ctx);
+        app.keyboard
+            .translate(&[key_event(Key::A, true, command())], command());
+        for invalid in ["", "valid prefix\0", "valid prefix\x1b"] {
+            assert!(app.paste_text(invalid).is_err());
+            assert!(commands.is_empty());
+            assert!(!app.focus_remote_after_paste);
+        }
+        assert_eq!(
+            app.keyboard.release_all(),
+            vec![(false, b'a' as u32), (false, 0xffe7)]
+        );
+    }
+
+    #[test]
+    fn paste_waits_for_a_desktop_and_does_not_queue_through_local_dialogs() {
+        let ctx = egui::Context::default();
+        let (mut app, commands) = connected_app(&ctx);
+        app.show_password_dialog = true;
+        assert!(app.paste_text("secret").is_err());
+        app.show_password_dialog = false;
+        app.show_sessions = true;
+        assert!(app.paste_text("secret").is_err());
+        app.show_sessions = false;
+        app.texture = None;
+        assert!(app.paste_text("secret").is_err());
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn disconnected_paste_does_not_claim_success_or_restore_focus() {
+        let ctx = egui::Context::default();
+        let (mut app, commands) = connected_app(&ctx);
+        drop(commands);
+        let old_status = app.status_msg.clone();
+        assert!(app.paste_text("hello").is_err());
+        assert_eq!(app.status_msg, old_status);
+        assert!(!app.focus_remote_after_paste);
+    }
+
+    #[test]
+    fn restoring_paste_focus_does_not_forward_toolbar_activation_keys() {
+        for activation in [Key::Enter, Key::Space] {
+            let ctx = egui::Context::default();
+            let (mut app, commands) = connected_app(&ctx);
+            app.paste_text("hello").unwrap();
+            assert!(matches!(
+                commands.try_recv().unwrap(),
+                VncCommand::TypeText(_)
+            ));
+            let input = egui::RawInput {
+                events: vec![key_event(activation, true, Modifiers::default())],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.render_framebuffer(ui, ctx));
+            });
+            assert!(commands.is_empty(), "toolbar activation leaked to VNC");
+            assert!(!app.focus_remote_after_paste);
+
+            let input = egui::RawInput {
+                events: vec![egui::Event::Text("z".into())],
+                ..Default::default()
+            };
+            let _ = ctx.run(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| app.render_framebuffer(ui, ctx));
+            });
+            for expected_down in [true, false] {
+                assert!(matches!(
+                    commands.try_recv().unwrap(),
+                    VncCommand::KeyEvent { down, keysym: 0x7a } if down == expected_down
+                ));
+            }
+            assert!(commands.is_empty());
+        }
+    }
 
     fn key_event(key: Key, pressed: bool, modifiers: Modifiers) -> egui::Event {
         egui::Event::Key {

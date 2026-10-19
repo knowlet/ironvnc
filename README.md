@@ -16,7 +16,7 @@ public RFB encodings, RSA-AES and Apple ARD authentication, and an SFTP file bro
   - **Apple ARD** (type 30), using a Mac account username and password, including 4096-bit DH groups and generator 5 offered by modern Screen Sharing servers.
 - **Session manager** — saved connections with credentials; single click opens each in its own window. Connections auto-save on connect.
 - **MobaXterm-style SFTP panel** — browse the remote host over SSH, drag-and-drop to upload, download with a click. Runs alongside the VNC session, independent of the VNC vendor.
-- **Clipboard:** Latin-1 standard CutText and negotiated UTF-8 Extended Clipboard text in both directions. Non-Latin-1 characters become `?` on basic-only servers. Image/file clipboard transfer is unsupported.
+- **Clipboard:** **Paste text →VNC** types local clipboard text into the remote app without requiring clipboard sharing, including Unicode keysyms, Return and Tab. **Sync clipboard** separately offers Latin-1 standard CutText or negotiated UTF-8 Extended Clipboard text. Non-Latin-1 characters become `?` when syncing to basic-only servers. Image/file clipboard transfer is unsupported.
 - **macOS input:** Command maps to Meta; Unicode text uses RFB Unicode keysyms. Apple private security types 33/35/36 and high-performance Screen Sharing are unsupported.
 - **Quality-of-life:** scale-to-fit rendering, scroll-wheel support, a Ctrl+Alt+Del button, desktop-name window titles, and partial-framebuffer updates.
 
@@ -82,6 +82,30 @@ selects account authentication; a password-only connection retains the legacy
 VNC choice. ARD credentials may each contain at most 63 UTF-8 bytes and must not
 contain embedded NULs; longer fields fail explicitly rather than being truncated.
 The existing `003.889` banner fallback continues to negotiate public RFB 3.8.
+
+### Pasting text
+
+To insert text copied on your computer, select the destination field in the
+remote desktop, then click **Paste text →VNC**. This sends the text as keyboard
+input and works without remote clipboard support. The former **Paste →VNC**
+button only offered clipboard contents to the server; it did not insert text.
+Native macOS Screen Sharing can ignore that standard clipboard transfer.
+
+The typing action supports up to **64 KiB of UTF-8 text**. It releases held
+remote keys and modifiers before typing, restores viewer focus without moving
+the remote cursor, and shows clipboard/read/send errors in the status bar.
+Empty text, oversized input and unsupported control characters are rejected
+before any text is sent. CRLF, CR and LF each become one Enter press; tabs
+become Tab presses. **In a terminal or form, these presses can execute a command
+or submit/navigate the form.** This action is keyboard input, so applications'
+bracketed-paste handling does not apply; the remote keyboard layout, input
+method and application still determine how the text is received.
+
+Use **Sync clipboard** when the server supports standard or Extended Clipboard
+and you want to transfer clipboard contents for pasting inside the remote app.
+The server must support the transfer; an offer is not a delivery acknowledgement.
+Normal **Cmd+V / Ctrl+V** continues to use the remote clipboard. To insert local
+text into a Mac that ignores clipboard sync, use **Paste text →VNC**.
 
 ### Headless self-test
 
