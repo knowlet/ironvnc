@@ -2669,6 +2669,7 @@ dependencies = [
  "cipher 0.4.4",
  "clap",
  "crossbeam-channel",
+ "crypto-bigint",
  "des 0.8.1",
  "dirs",
  "eax",
@@ -2676,6 +2677,7 @@ dependencies = [
  "egui",
  "flate2",
  "image",
+ "md5",
  "rand 0.8.7",
  "rfd",
  "rsa 0.9.10",
@@ -2690,6 +2692,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "winresource",
+ "zeroize",
 ]
 
 [[package]]

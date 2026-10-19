@@ -37,7 +37,7 @@ python3 scripts/rfb_fixture.py --binary target/release/ironvnc
 
 The standard-library fixture checks 3.3/3.7/3.8 None and VNCAuth, a vendor-style
 003.889 banner, explicit true-colour negotiation, Raw/Tight/ZRLE frames, and
-rejection of malformed banners, unsupported ARD, oversized lengths and invalid
+rejection of malformed banners, unsupported-only Apple security offers, oversized lengths and invalid
 rectangles. Its 15 cases include a valid black frame and assert that headless
 mode does not send keyboard or pointer input. It never captures or connects to
 a real desktop.
@@ -56,6 +56,22 @@ UTF-8 credentials, invalid subtypes and modified MACs. EAX is independently
 composed from CMAC/CTR and checked against three published known vectors.
 Post-authentication RFB fields are deliberately split across encrypted records.
 
+The optional Apple ARD fixture also uses Python `cryptography`, independently
+combining Python integer DH arithmetic, MD5 and AES-128-ECB. It validates the
+actual binary's encrypted credentials, public value and a complete decoded
+framebuffer against a synthetic `003.889` server offering `[30, 33, 36, 35]`.
+
+```sh
+python3 scripts/ard_fixture.py --binary target/release/ironvnc --verbose
+```
+
+Cases include 1024/2048/4096-bit groups (including generator 5), a 129-byte padded
+group that exercises exact-width secret hashing, UTF-8 credential boundaries,
+missing credentials, mixed security offers, fresh random exchanges, malformed
+DH parameters, truncated messages and authentication denials. Rust unit tests
+also check the published noVNC credential ciphertext vector and the protocol's
+length/NUL/parameter boundaries; those run in the native CI matrix.
+
 ## Limits
 
 - CI is headless: no GUI, real desktop capture, SFTP server, system clipboard,
@@ -66,7 +82,7 @@ Post-authentication RFB fields are deliberately split across encrypted records.
   messages and invalid coordinates close the connection.
 - Sessions continue to store plaintext passwords. Existing RA2 and SSH host-key
   trust behavior is unchanged. Use only appropriately trusted endpoints.
-- VeNCrypt and Apple private protocols remain unsupported; see
+- VeNCrypt, Apple security types 33/35/36 and Apple private screen encodings remain unsupported; see
   [PROTOCOL.md](PROTOCOL.md). There is no claim of complete security audit.
 - Command/Ctrl shortcuts use egui key and Copy/Cut/Paste events without
   forwarding the Paste event's local text. If the native egui clipboard backend

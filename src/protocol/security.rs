@@ -1,5 +1,5 @@
 use crate::connection::{Credentials, VncCommand, VncEvent};
-use crate::protocol::{ra2, AsyncRw};
+use crate::protocol::{ard, ra2, AsyncRw};
 use anyhow::{bail, Result};
 use cipher::{generic_array::GenericArray, BlockEncrypt, KeyInit};
 use crossbeam_channel::{Receiver, Sender};
@@ -12,18 +12,19 @@ pub const SECURITY_NONE: u8 = 1;
 pub const SECURITY_VNC_AUTH: u8 = 2;
 pub const SECURITY_RA2: u8 = 5;
 pub const SECURITY_RA2NE: u8 = 6;
+pub const SECURITY_ARD: u8 = 30;
 pub const SECURITY_RA2_256: u8 = 129;
 pub const SECURITY_RA2NE_256: u8 = 130;
 
 /// Negotiate and complete the security handshake, taking ownership of the
 /// TCP stream. Returns the stream the RFB session should continue on — the
-/// raw TCP stream (buffered) for None/VncAuth/RA2ne, or an AES-EAX encrypted
+/// raw TCP stream (buffered) for None/VncAuth/ARD/RA2ne, or an AES-EAX encrypted
 /// channel for RA2/RA2_256 (where the whole session is encrypted).
 ///
 /// Missing credentials are requested through the event/command channels.
 /// RA2 requests them only after its encrypted subtype identifies which fields
-/// are needed. Blocking for user input is safe on the VNC background thread's
-/// single-threaded tokio runtime.
+/// are needed; ARD always needs an account. Blocking for user input is safe on
+/// the VNC background thread's single-threaded tokio runtime.
 pub async fn negotiate(
     mut stream: TcpStream,
     username: Option<&str>,
@@ -32,10 +33,6 @@ pub async fn negotiate(
     event_tx: &Sender<VncEvent>,
     cmd_rx: &Receiver<VncCommand>,
 ) -> Result<Box<dyn AsyncRw>> {
-    // Track whether we actually ran VNC Authentication: the SecurityResult
-    // message follows VNC Auth in ALL RFB versions (3.3/3.7/3.8), not just 3.8.
-    let mut did_vnc_auth = false;
-
     let chosen: u8 = if rfb_minor >= 7 {
         let count = stream.read_u8().await?;
         if count == 0 {
@@ -46,30 +43,7 @@ pub async fn negotiate(
         stream.read_exact(&mut types).await?;
         info!("Server security types: {types:?}");
 
-        // Preference: None (when we have no password) > VncAuth > None >
-        // RA2 family (RSA-AES; needed for RealVNC servers).
-        let chosen = if types.contains(&SECURITY_NONE) && password.map_or(true, |p| p.is_empty()) {
-            SECURITY_NONE
-        } else if types.contains(&SECURITY_VNC_AUTH) {
-            SECURITY_VNC_AUTH
-        } else if types.contains(&SECURITY_NONE) {
-            SECURITY_NONE
-        } else if types.contains(&SECURITY_RA2) {
-            SECURITY_RA2
-        } else if types.contains(&SECURITY_RA2_256) {
-            SECURITY_RA2_256
-        } else if types.contains(&SECURITY_RA2NE) {
-            SECURITY_RA2NE
-        } else if types.contains(&SECURITY_RA2NE_256) {
-            SECURITY_RA2NE_256
-        } else {
-            bail!(
-                "No supported security type offered by server (got {:?}). \
-                 This viewer supports None(1), VNC Auth(2), and RA2/RSA-AES(5/6/129/130); \
-                 the server likely requires VeNCrypt/ARD, which are not yet implemented.",
-                types
-            );
-        };
+        let chosen = select_security_type(&types, username, password)?;
 
         stream.write_u8(chosen).await?;
         chosen
@@ -129,26 +103,78 @@ pub async fn negotiate(
         }
     }
 
-    // --- Classic types over the plain stream ---
+    // --- Credential-only handshakes; the RFB session stays on the plain stream ---
     if chosen == SECURITY_VNC_AUTH {
         let pw = resolve_password(password, event_tx, cmd_rx)?;
         vnc_auth(&mut stream, &pw).await?;
-        did_vnc_auth = true;
+    } else if chosen == SECURITY_ARD {
+        info!("Using Apple ARD (DH/AES-128, credentials only)");
+        ard::handshake(&mut stream, || {
+            resolve_credentials(
+                ra2::CredentialSubtype::UsernamePassword,
+                username,
+                password,
+                event_tx,
+                cmd_rx,
+            )
+        })
+        .await?;
     }
 
     let mut plain: Box<dyn AsyncRw> = Box::new(BufReader::new(stream));
 
     // Read the SecurityResult word when it is actually sent:
-    //  - after VNC Authentication in EVERY version, and
+    //  - after VNC Authentication or ARD in every applicable version, and
     //  - after ANY type (incl. None) in RFB 3.8+.
     // A failure reason string only accompanies the result in 3.8+; pre-3.8
     // servers send just the 4-byte result with no reason, so we must not try
     // to read one (that would block/desync).
-    if did_vnc_auth || rfb_minor >= 8 {
+    if matches!(chosen, SECURITY_VNC_AUTH | SECURITY_ARD) || rfb_minor >= 8 {
         read_security_result(&mut plain, rfb_minor >= 8).await?;
     }
 
     Ok(plain)
+}
+
+fn select_security_type(
+    types: &[u8],
+    username: Option<&str>,
+    password: Option<&str>,
+) -> Result<u8> {
+    // An explicit account must not be mistaken for Apple's separate legacy VNC
+    // password when both 2 and 30 are offered. Prefer a full-session RA2 channel
+    // if an unusual server also offers one, then ARD account authentication.
+    if username.is_some() && types.contains(&SECURITY_ARD) {
+        for candidate in [SECURITY_RA2_256, SECURITY_RA2, SECURITY_ARD] {
+            if types.contains(&candidate) {
+                return Ok(candidate);
+            }
+        }
+    }
+    // Preserve existing choices for classic/RealVNC servers and password-only
+    // saved sessions. An ARD-only server prompts for the missing account fields.
+    if types.contains(&SECURITY_NONE) && password.is_none_or(str::is_empty) {
+        return Ok(SECURITY_NONE);
+    }
+    for candidate in [
+        SECURITY_VNC_AUTH,
+        SECURITY_NONE,
+        SECURITY_RA2,
+        SECURITY_RA2_256,
+        SECURITY_RA2NE,
+        SECURITY_RA2NE_256,
+        SECURITY_ARD,
+    ] {
+        if types.contains(&candidate) {
+            return Ok(candidate);
+        }
+    }
+    bail!(
+        "No supported security type offered by server (got {:?}). \
+         This viewer supports None(1), VNC Auth(2), Apple ARD(30), and RA2/RSA-AES(5/6/129/130). \
+         VeNCrypt/TLS and other Apple security types (33/35/36) are not implemented.",
+        types
+    )
 }
 
 /// Read the 4-byte SecurityResult; on failure, read the reason string only
@@ -207,7 +233,7 @@ fn resolve_password(
     }
 }
 
-/// Preserve supplied fields and request only those required by the RA2 subtype.
+/// Preserve supplied fields and request only those required by the credential mode.
 fn resolve_credentials(
     subtype: ra2::CredentialSubtype,
     username: Option<&str>,
@@ -275,7 +301,10 @@ where
     // Cap the server-controlled length: a hostile server could otherwise send
     // 0xFFFFFFFF and force a ~4 GB allocation before we read anything.
     const MAX_REASON: usize = 64 * 1024;
-    let len = (stream.read_u32().await? as usize).min(MAX_REASON);
+    let len = stream.read_u32().await? as usize;
+    if len > MAX_REASON {
+        bail!("Server authentication reason exceeds 64 KiB limit");
+    }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).await?;
     Ok(String::from_utf8_lossy(&buf).to_string())
@@ -317,6 +346,63 @@ fn vnc_des_response(password: &str, challenge: &[u8; 16]) -> [u8; 16] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apple_offers_select_ard_with_or_without_supplied_credentials() {
+        for (username, password) in [(None, None), (Some("alice"), Some("password"))] {
+            assert_eq!(
+                select_security_type(&[30, 33, 36, 35], username, password).unwrap(),
+                SECURITY_ARD
+            );
+        }
+        assert!(select_security_type(&[33, 36, 35], None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("Apple ARD(30)"));
+    }
+
+    #[test]
+    fn explicit_apple_account_selects_ard_instead_of_legacy_password_or_none() {
+        for types in [&[2, 30, 33, 36, 35][..], &[1, 30][..]] {
+            assert_eq!(
+                select_security_type(types, Some("alice"), None).unwrap(),
+                SECURITY_ARD
+            );
+        }
+        assert_eq!(
+            select_security_type(&[2, 30], None, Some("vnc-only")).unwrap(),
+            SECURITY_VNC_AUTH
+        );
+        assert_eq!(
+            select_security_type(&[1, 30], None, None).unwrap(),
+            SECURITY_NONE
+        );
+    }
+
+    #[test]
+    fn ard_does_not_downgrade_an_available_full_session_ra2_channel() {
+        for (types, expected) in [
+            (&[30, 5][..], SECURITY_RA2),
+            (&[30, 5, 129][..], SECURITY_RA2_256),
+        ] {
+            assert_eq!(
+                select_security_type(types, Some("alice"), Some("pw")).unwrap(),
+                expected
+            );
+        }
+        // Non-Apple offers retain the existing preference.
+        assert_eq!(
+            select_security_type(&[2, 5, 129], Some("alice"), Some("pw")).unwrap(),
+            SECURITY_VNC_AUTH
+        );
+    }
+
+    #[tokio::test]
+    async fn oversized_failure_reason_is_rejected_without_reading_a_body() {
+        let wire = u32::MAX.to_be_bytes();
+        let error = read_reason_string(&mut wire.as_slice()).await.unwrap_err();
+        assert!(error.to_string().contains("exceeds 64 KiB"));
+    }
 
     fn assert_request(
         event_rx: &Receiver<VncEvent>,

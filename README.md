@@ -1,7 +1,7 @@
 # IronVNC
 
 A free, open-source **VNC (RFB) viewer written in Rust**, with an egui interface,
-public RFB encodings, RSA-AES authentication, and an SFTP file browser.
+public RFB encodings, RSA-AES and Apple ARD authentication, and an SFTP file browser.
 
 > Iron oxidizes into rust. 🦀
 
@@ -13,10 +13,11 @@ public RFB encodings, RSA-AES authentication, and an SFTP file browser.
   - None
   - VNC Authentication (DES challenge/response)
   - **RA2 / RSA-AES** (types 5, 6, 129, 130), including AES-256 and username/password or password-only credential subtypes, with full-session or handshake-only encryption.
+  - **Apple ARD** (type 30), using a Mac account username and password, including 4096-bit DH groups and generator 5 offered by modern Screen Sharing servers.
 - **Session manager** — saved connections with credentials; single click opens each in its own window. Connections auto-save on connect.
 - **MobaXterm-style SFTP panel** — browse the remote host over SSH, drag-and-drop to upload, download with a click. Runs alongside the VNC session, independent of the VNC vendor.
 - **Clipboard:** Latin-1 standard CutText and negotiated UTF-8 Extended Clipboard text in both directions. Non-Latin-1 characters become `?` on basic-only servers. Image/file clipboard transfer is unsupported.
-- **macOS input:** Command maps to Meta; Unicode text uses RFB Unicode keysyms. Apple private ARD authentication and high-performance Screen Sharing are unsupported.
+- **macOS input:** Command maps to Meta; Unicode text uses RFB Unicode keysyms. Apple private security types 33/35/36 and high-performance Screen Sharing are unsupported.
 - **Quality-of-life:** scale-to-fit rendering, scroll-wheel support, a Ctrl+Alt+Del button, desktop-name window titles, and partial-framebuffer updates.
 
 ## Install / Build
@@ -56,17 +57,34 @@ ironvnc --session "My Desktop"          # open a saved session by name
 
 If the server requires a password, IronVNC prompts for it in a popup and (on success) saves the session so you don't have to re-enter it. Saved sessions live in `sessions.json` **next to the executable** — the path is shown at the bottom of the session manager.
 
-RA2 servers requesting an account also prompt for a missing VNC username.
+Apple ARD and RA2 servers requesting an account also prompt for a missing VNC username.
 Use `-U` / `--username` for VNC; `--user` remains the SSH/SFTP option. Saved
 sessions preserve their identity when accounts share an endpoint. Ambiguous
 ad-hoc credential lookup requires an explicit session or username. Existing
 session files remain readable.
 
+### macOS Screen Sharing
+
+For a server offering `[30, 33, 36, 35]`, IronVNC selects ARD type 30 and prompts
+for the missing account fields. Use the Mac's account name and login password:
+
+```bash
+ironvnc --host mac.local --username alice
+```
+
+The account must be allowed access in the Mac's Screen Sharing or Remote
+Management settings. See [Apple's Screen Sharing guide](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac).
+When both legacy VNC authentication and ARD are offered, specifying `--username`
+selects account authentication; a password-only connection retains the legacy
+VNC choice. ARD credentials may each contain at most 63 UTF-8 bytes and must not
+contain embedded NULs; longer fields fail explicitly rather than being truncated.
+The existing `003.889` banner fallback continues to negotiate public RFB 3.8.
+
 ### Headless self-test
 
 ```bash
 ironvnc --test -H <host> -P <password>            # connect, verify a framebuffer decodes, exit
-ironvnc --test -H <host> -U <username> -P <password> # RA2 account authentication
+ironvnc --test -H <host> -U <username> -P <password> # Apple ARD / RA2 account authentication
 ironvnc --sftp-test -H <host> --user <u> -P <pw>  # verify SSH/SFTP connectivity
 ```
 
@@ -78,7 +96,8 @@ For isolated synthetic interoperability tests, run
 
 - `sessions.json` stores passwords in plaintext and is **gitignored** — do not commit it.
 - The RA2 host key is currently accepted without pinning (convenient for trusted networks); certificate/known-hosts verification is a planned improvement.
-- VeNCrypt (TLS) and Apple ARD authentication are not yet implemented.
+- ARD encrypts the credential exchange only; it does not verify the server's identity or encrypt subsequent screen/input/clipboard traffic. Use a trusted network or an authenticated encrypted tunnel.
+- VeNCrypt (TLS), Apple security types 33/35/36 and Apple private screen encodings are not implemented.
 
 See [public protocol scope](docs/PROTOCOL.md), [review/provenance](docs/REVIEW.md),
 and [verification limits](docs/SUPPORT.md). Synthetic protocol tests do not
