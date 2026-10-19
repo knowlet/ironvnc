@@ -72,7 +72,7 @@ actual binary's encrypted credentials, public value and a complete decoded
 framebuffer against a synthetic `003.889` server offering `[30, 33, 36, 35]`.
 
 ```sh
-python3 scripts/ard_fixture.py --binary target/release/ironvnc --verbose
+python3 scripts/ard_fixture.py --binary target/release/ironvnc
 ```
 
 Cases include 1024/2048/4096-bit groups (including generator 5), a 129-byte padded
