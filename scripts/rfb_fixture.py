@@ -38,9 +38,9 @@ def serve(listener, banner, auth, encoding, failure, black):
             return
         minor = 8 if banner == b"RFB 003.889\n" else int(banner[8:11])
         assert exact(conn, 12) == f"RFB 003.{minor:03d}\n".encode()
-        if failure == "ard":
-            conn.sendall(bytes([1, 30]))
-            assert conn.recv(1) == b"", "ARD was selected without implementation"
+        if failure == "unsupported-apple":
+            conn.sendall(bytes([3, 33, 36, 35]))
+            assert conn.recv(1) == b"", "an unsupported Apple security type was selected"
             return
         if minor == 3:
             conn.sendall(struct.pack(">I", auth))
@@ -142,7 +142,7 @@ def main():
     run_case(args.binary, "ZRLE solid", encoding=16)
     run_case(args.binary, "black frame without remote input", black=True)
     run_case(args.binary, "malformed banner rejected", b"NOT AN RFB!\n", failure="banner")
-    for failure in ("ard", "name", "clipboard", "rectangle"):
+    for failure in ("unsupported-apple", "name", "clipboard", "rectangle"):
         run_case(args.binary, f"{failure} rejected", failure=failure)
     print("All 15 synthetic loopback interoperability cases passed.")
 

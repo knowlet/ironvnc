@@ -42,6 +42,10 @@ aes = "0.8"
 sha1 = "0.10"
 sha2 = "0.10"
 rand = "0.8"
+# Apple ARD (type 30): bounded DH arithmetic and the protocol's MD5 KDF.
+crypto-bigint = { version = "0.7", default-features = false, features = ["alloc", "zeroize"] }
+md5 = "0.8"
+zeroize = "1"
 # SFTP side-channel file transfer (MobaXterm-style remote browser).
 # Use the `ring` crypto backend, not the default aws-lc-rs (which needs NASM on Windows).
 russh = { version = "0.61", default-features = false, features = ["flate2", "ring", "rsa"] }
@@ -52,4 +56,6 @@ rfd = "0.15"
 [profile.dev.package.num-bigint-dig]
 opt-level = 3
 [profile.dev.package.rsa]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
 opt-level = 3

@@ -1,6 +1,6 @@
 # Public protocol baseline
 
-Research date: 2026-10-14. The public interoperability baseline is RFB 3.8,
+Research date: 2026-10-19. The public interoperability baseline is RFB 3.8,
 with 3.3 and 3.7 compatibility, per the
 [RealVNC specification entry](https://help.realvnc.com/hc/en-us/articles/360002720337-RFB-protocol-specification)
 and [RFC 6143](https://datatracker.ietf.org/doc/html/rfc6143).
@@ -29,7 +29,7 @@ RA2 supports username/password subtype 1 and password-only subtype 2;
 unknown subtypes and fields exceeding 255 UTF-8 bytes are rejected.
 RA2 host keys retain the existing unpinned trust behavior.
 
-VeNCrypt/TLS, ARD private authentication, Apple private encodings, high-performance
+VeNCrypt/TLS, Apple security types 33/35/36, Apple private encodings, high-performance
 Screen Sharing, image/file clipboard transfer, and commercial RFB 6.0 are not
 implemented. Unsupported-only security offers fail explicitly.
 
@@ -39,9 +39,38 @@ Apple documents a
 [VNC password access option](https://support.apple.com/guide/mac-help/turn-screen-sharing-on-or-off-mh11848/mac)
 and [third-party VNC viewer access](https://support.apple.com/guide/remote-desktop/virtual-network-computing-access-and-control-apde0dd523e/mac).
 These documents do not publish a complete ARD authentication wire specification.
-A synthetic `003.889` banner test establishes fallback behavior only; it does
-not establish interoperability with a particular macOS server build. RA2
-username support does not imply Apple account authentication support.
+IronVNC implements ARD security type 30 using the community
+[Diffie-Hellman Authentication specification, section 7.2.13](https://github.com/rfbproto/rfbproto/blob/master/rfbproto.rst#diffie-hellman-authentication),
+cross-checked against upstream
+[noVNC](https://github.com/novnc/noVNC/blob/4a2cc175ae8af50fe8cb85a05d40908c01c43f6a/core/rfb.js)
+and [LibVNC](https://github.com/LibVNC/libvncserver/blob/98aaee0560baa0332339b2ef464ea96ed9b9b28c/src/libvncclient/rfbclient.c).
+
+The server sends a big-endian 16-bit generator, a 16-bit key size in bytes,
+then the modulus and server public value, each exactly that size. The client
+uses fresh OS randomness for its DH private value. MD5 of the shared secret,
+left-padded to exactly the advertised byte width, provides an AES-128 key.
+The encrypted payload is two 64-byte, UTF-8, NUL-terminated fields with random
+padding, encrypted with AES-128-ECB without additional block padding. The client
+sends those 128 bytes followed by its fixed-width public value, then consumes
+SecurityResult. These legacy cipher choices are mandated by this protocol.
+
+The implementation accepts key sizes **128 through 512 bytes inclusive**, with
+an actual modulus of at least 1024 bits. It supports the older 1024-bit/generator-2
+case and the 4096-bit/generator-5 case described in a developer's
+[modern Apple capture](https://github.com/d3cker/RealVNC-macOS-patch).
+That capture is third-party interoperability evidence, not an Apple specification.
+Lengths are bounded before allocation or exponentiation; even/small moduli,
+out-of-range generators/public values and degenerate exchanges fail explicitly.
+Arithmetic uses RustCrypto `crypto-bigint` with fixed-precision exponentiation.
+These are structural checks, not primality/subgroup certification or server
+identity verification. ARD encrypts credentials only; the ensuing RFB session
+remains unencrypted. Use trusted endpoints or an authenticated encrypted tunnel.
+
+Synthetic tests cover the exact `[30, 33, 36, 35]` offer, `003.889` fallback,
+standard 3.7/3.8, 1024/2048/4096-bit groups, padded fixed-width secrets, credential
+limits and failure handling. They do not establish interoperability with a
+particular real macOS server build. ARD type 30 support does not implement
+security types 33/35/36, Apple private encodings or high-performance Screen Sharing.
 
 The native macOS viewer maps Command to Meta and encodes Unicode keysyms.
 GUI rendering, system clipboard integration, keyboard layouts, permission

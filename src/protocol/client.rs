@@ -349,7 +349,7 @@ impl VncClient {
 
 /// RFC 6143 requires unknown 3.x versions to use the 3.3 handshake. The
 /// explicitly recognised 003.889 vendor banner can negotiate standard 3.8;
-/// this does not enable any Apple private authentication or encoding.
+/// ARD type 30 is negotiated separately, without Apple's private encodings.
 fn negotiate_version(banner: &[u8; 12]) -> Result<u8> {
     ensure!(
         banner.starts_with(b"RFB ")

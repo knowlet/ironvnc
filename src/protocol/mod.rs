@@ -1,3 +1,4 @@
+pub mod ard;
 pub mod client;
 pub mod clipboard;
 pub mod encoding;
