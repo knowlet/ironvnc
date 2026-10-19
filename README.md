@@ -33,10 +33,13 @@ cargo build --locked --release --jobs 2
 
 The [native binary workflow](https://github.com/knowlet/ironvnc/actions/workflows/ci.yml)
 builds and runs headless tests on Linux, macOS, and Windows, on x64 and ARM64.
-Download the per-target Actions artifact; it includes the binary, licenses,
-dependency notices, source/build provenance and SHA256 checksums. These are
-unsigned executables, not installers. See the [support matrix](docs/SUPPORT.md)
-for tested OS baselines and verification limits.
+Each successful push to `main` publishes six tested archives as an immutable
+[Nightly prerelease](https://github.com/knowlet/ironvnc/releases) tagged
+`nightly-<full-commit-SHA>`. Every archive has a separate SHA256 checksum file.
+Pull-request builds remain downloadable as Actions artifacts for 14 days.
+Nightly archives include the binary, licenses, dependency notices, source/build
+provenance, and SHA256 checksums. These are unsigned executables, not installers;
+see the [support matrix](docs/SUPPORT.md) for verification limits.
 
 ## Usage
 
