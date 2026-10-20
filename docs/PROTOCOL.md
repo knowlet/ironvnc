@@ -17,6 +17,16 @@ Tight, ZRLE, and RSA-AES come from the community
 which [TigerVNC](https://tigervnc.org/) identifies as its protocol reference.
 This extension reference is not an IETF standard.
 
+Per [RFC 6143 section 7.5.6](https://www.rfc-editor.org/rfc/rfc6143#section-7.5.6),
+ClientCutText announces local clipboard contents; it does not execute a paste.
+The explicit **Paste text →VNC** action instead sends paired standard KeyEvent
+messages. Latin-1 and Unicode keysyms are shared with normal text input; CRLF,
+CR and LF map to Return, and tab maps to Tab. Input is fully validated and
+limited to 64 KiB of UTF-8 before queuing, producing at most 1 MiB of key-event
+data. Other control characters are rejected. Held keys/modifiers are released
+before the bounded batch. No clipboard extension or remote paste chord is
+needed, and no per-character application acknowledgement is implied.
+
 The `003.889` compatibility mapping also follows observable behavior in the
 official [noVNC implementation](https://github.com/novnc/noVNC/blob/master/core/rfb.js).
 AES-256 RSA-AES random lengths follow the official
@@ -71,6 +81,14 @@ standard 3.7/3.8, 1024/2048/4096-bit groups, padded fixed-width secrets, credent
 limits and failure handling. They do not establish interoperability with a
 particular real macOS server build. ARD type 30 support does not implement
 security types 33/35/36, Apple private encodings or high-performance Screen Sharing.
+
+Authentication type 30 does not negotiate Apple's private pasteboard protocol.
+An [independent macOS 15.7.3 interoperability report](https://github.com/sp00nznet/vncfree/blob/main/docs/macos.md)
+observed ignored ClientCutText after `003.889` to `003.008` negotiation with
+type 30; this is a specific implementation report, not a claim about every
+Mac server. **Paste text →VNC** provides a standard-keyboard fallback for that
+case. IronVNC does not infer clipboard support from authentication or the
+viewer's own operating system.
 
 The native macOS viewer maps Command to Meta and encodes Unicode keysyms.
 GUI rendering, system clipboard integration, keyboard layouts, permission

@@ -82,14 +82,33 @@ DH parameters, truncated messages and authentication denials. Rust unit tests
 also check the published noVNC credential ciphertext vector and the protocol's
 length/NUL/parameter boundaries; those run in the native CI matrix.
 
+## Clipboard typing checks
+
+Native Rust tests exercise **Paste text →VNC** without a system clipboard or
+real desktop. A production-client loopback case offers `003.889`, negotiates
+public RFB 3.8 and provides no clipboard extension; it checks the exact Unicode,
+Return and Tab KeyEvent stream, nonfatal clipboard validation feedback, and
+subsequent ordinary input. The fixture uses None authentication to isolate
+post-login input from the separately tested ARD handshake.
+
+UI tests check held-key/modifier release order, validation before any output,
+login/dialog gating, closed command channels, and restoration of framebuffer
+focus. An egui frame test activates the toolbar with Enter/Space and verifies
+that those local activation keys are not forwarded after focus restoration.
+Text validation tests cover mixed line endings, unsupported controls and the
+64 KiB UTF-8 limit. These checks do not establish actual App/IME acceptance,
+native clipboard permissions or visual GUI behavior on a real Mac.
+
 ## Limits
 
 - CI is headless: no GUI, real desktop capture, SFTP server, system clipboard,
   keyboard-layout, accessibility permission, Gatekeeper or notarization test.
 - No real RealVNC/TigerVNC/Apple desktop was contacted in this task. Synthetic
   protocol tests do not imply certification with those products.
-- Desktop size is capped at 32 million pixels; clipboard text at 8 MiB. Oversized
-  messages and invalid coordinates close the connection.
+- Desktop size is capped at 32 million pixels; clipboard sync text at 8 MiB,
+  and explicit clipboard typing at 64 KiB of UTF-8 (at most 1 MiB of KeyEvents).
+  Oversized server messages and invalid coordinates close the connection.
+  Invalid local text is rejected with a nonfatal status message.
 - Sessions continue to store plaintext passwords. Existing RA2 and SSH host-key
   trust behavior is unchanged. Use only appropriately trusted endpoints.
 - VeNCrypt, Apple security types 33/35/36 and Apple private screen encodings remain unsupported; see
@@ -98,6 +117,14 @@ length/NUL/parameter boundaries; those run in the native CI matrix.
   forwarding the Paste event's local text. If the native egui clipboard backend
   cannot read any text, it may suppress the paste key-down entirely; this
   upstream event limitation is not recoverable by the viewer's input layer.
+  The explicit **Paste text →VNC** toolbar action reads the local clipboard
+  directly and reports failure instead of silently ignoring it.
+- Clipboard typing sends a bounded batch without pacing or a remote application
+  acknowledgement. Newlines press Enter and tabs press Tab, so they may execute
+  commands or navigate/submit forms; terminal bracketed paste does not apply.
+  Unicode keysyms are sent as specified, but keyboard layouts and input methods
+  remain a manual compatibility check. **Sync clipboard** still requires server
+  support and does not implement Apple's private pasteboard messages.
 
 Per-commit results, artifact URLs, and merge evidence are recorded in the fork's
 pull request and its Actions run, so this document does not confuse one commit's

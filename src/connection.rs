@@ -1,4 +1,5 @@
 use crate::protocol::client::VncClient;
+use crate::protocol::text_input::TypedText;
 use crate::sessions::SessionIdentity;
 use crossbeam_channel::{Receiver, Sender};
 use std::thread;
@@ -37,6 +38,11 @@ pub enum VncEvent {
     DesktopName(String),
     /// Server sent clipboard text.
     ClipboardText(String),
+    /// Nonfatal feedback for a user-requested clipboard operation.
+    ClipboardStatus {
+        message: String,
+        is_error: bool,
+    },
     /// Server requires VNC authentication — UI should prompt for password.
     NeedPassword,
     /// Ask only for missing fields after the server selects its auth subtype.
@@ -62,6 +68,9 @@ pub enum VncCommand {
     },
     /// Send clipboard text to the server.
     SetClipboard(String),
+    /// Type prevalidated text using ordinary RFB key taps, without clipboard
+    /// protocol support on the server.
+    TypeText(TypedText),
     /// Response to NeedPassword: provide the password to the waiting auth step.
     ProvidePassword(String),
     ProvideCredentials(Credentials),
@@ -107,8 +116,16 @@ impl VncConnection {
         let _ = self.cmd_tx.send(VncCommand::PointerEvent { buttons, x, y });
     }
 
-    pub fn send_clipboard(&self, text: String) {
-        let _ = self.cmd_tx.send(VncCommand::SetClipboard(text));
+    pub fn send_clipboard(&self, text: String) -> Result<(), String> {
+        self.cmd_tx
+            .send(VncCommand::SetClipboard(text))
+            .map_err(|_| "VNC connection is no longer available".to_string())
+    }
+
+    pub fn type_text(&self, text: TypedText) -> Result<(), String> {
+        self.cmd_tx
+            .send(VncCommand::TypeText(text))
+            .map_err(|_| "VNC connection is no longer available".to_string())
     }
 
     pub fn provide_credentials(&self, credentials: Credentials) {
@@ -119,5 +136,30 @@ impl VncConnection {
 
     pub fn disconnect(&self) {
         let _ = self.cmd_tx.send(VncCommand::Disconnect);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disconnected_clipboard_actions_report_errors_without_payloads() {
+        let (_event_tx, event_rx) = crossbeam_channel::unbounded();
+        let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
+        drop(cmd_rx);
+        let connection = VncConnection { event_rx, cmd_tx };
+        let message = "private clipboard value";
+        let expected = "VNC connection is no longer available";
+        assert_eq!(
+            connection.send_clipboard(message.into()).unwrap_err(),
+            expected
+        );
+        assert_eq!(
+            connection
+                .type_text(TypedText::new(message).unwrap())
+                .unwrap_err(),
+            expected
+        );
     }
 }
