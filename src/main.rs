@@ -298,6 +298,7 @@ fn headless_test(
                 conn.disconnect();
                 return Ok(());
             }
+            Ok(VncEvent::UpdateComplete(permit)) => drop(permit),
             Ok(VncEvent::ClipboardText(_) | VncEvent::ClipboardStatus { .. }) => {}
             Ok(VncEvent::Error(e)) => {
                 println!("[test] FAIL: {e}");

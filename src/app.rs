@@ -306,8 +306,11 @@ impl VncApp {
     // ── Event processing ──────────────────────────────────────────────────────
 
     fn process_events(&mut self, ctx: &egui::Context) {
+        // Keep one finite snapshot: its completion credits remain held during
+        // collection. Releasing them in try_iter would let a fast producer turn
+        // this UI pass (and egui's pending texture deltas) into an unbounded drain.
         let events: Vec<VncEvent> = match &self.connection {
-            Some(conn) => conn.event_rx.try_iter().collect(),
+            Some(conn) => conn.event_rx.try_iter().take(conn.event_rx.len()).collect(),
             None => return,
         };
 
@@ -366,6 +369,7 @@ impl VncApp {
                     }
                     ctx.request_repaint();
                 }
+                VncEvent::UpdateComplete(permit) => drop(permit),
                 VncEvent::ClipboardText(text) => {
                     let result = self.local_clipboard().and_then(|cb| {
                         cb.set_text(text)
@@ -1567,6 +1571,9 @@ impl RemoteKeyboard {
 }
 
 #[cfg(test)]
+mod update_tests;
+
+#[cfg(test)]
 mod input_tests {
     use super::*;
     use crate::connection::VncCommand;
@@ -1575,7 +1582,7 @@ mod input_tests {
         let mut app = VncApp::from_initial(None);
         let (_, event_rx) = crossbeam_channel::unbounded();
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        app.connection = Some(VncConnection { event_rx, cmd_tx });
+        app.connection = Some(VncConnection::from_channels(event_rx, cmd_tx));
         app.texture = Some(ctx.load_texture(
             "paste-test",
             egui::ColorImage::new([2, 2], Color32::BLACK),

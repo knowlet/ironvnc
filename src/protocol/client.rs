@@ -9,9 +9,11 @@ use crate::protocol::{
 use anyhow::{bail, ensure, Result};
 use crossbeam_channel::{Receiver, Sender};
 use flate2::Decompress;
+use std::sync::Arc;
 use tight::TightState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 use tracing::{debug, info, warn};
 
 // Explicit resource budgets, including enough pixels for a 7680×4320 desktop.
@@ -20,6 +22,8 @@ const MAX_DESKTOP_NAME_BYTES: u32 = 1024 * 1024;
 const MAX_UPDATE_RECTANGLES: u16 = 16_384;
 // Bound allocation and UI-event churn separately from decoded pixel work.
 const MAX_UPDATE_RESIZES: u16 = 16;
+// Include both queued events and updates drained by the UI but not prepared yet.
+const MAX_IN_FLIGHT_UPDATES: usize = 2;
 
 pub struct VncClient;
 
@@ -105,8 +109,11 @@ impl VncClient {
         let pf = PixelFormat::preferred();
         send_pixel_format(&mut stream, &pf).await?;
 
-        let _ = event_tx.send(VncEvent::DesktopSize(fb_width as u32, fb_height as u32));
-        let _ = event_tx.send(VncEvent::DesktopName(name));
+        send_event(
+            &event_tx,
+            VncEvent::DesktopSize(fb_width as u32, fb_height as u32),
+        )?;
+        send_event(&event_tx, VncEvent::DesktopName(name))?;
 
         // --- SetEncodings (prefer ZRLE > Hextile > CopyRect > Raw; Tight last) ---
         let encodings: &[i32] = &[
@@ -127,56 +134,37 @@ impl VncClient {
         }
         stream.write_all(&enc_msg).await?;
 
-        // --- Initial full FramebufferUpdateRequest ---
-        send_fb_update_request(&mut stream, false, 0, 0, fb_width, fb_height).await?;
-
         let mut fb = Framebuffer::new(fb_width as u32, fb_height as u32);
         let mut zrle_decomp = Decompress::new(true);
         let mut tight_state = TightState::new();
         let mut clipboard = Clipboard::default();
 
+        let update_credits = Arc::new(Semaphore::new(MAX_IN_FLIGHT_UPDATES));
+        let mut request_permit = None;
+        let mut request_full = true;
+
         // --- Main message loop ---
         loop {
-            while let Ok(cmd) = cmd_rx.try_recv() {
-                match cmd {
-                    VncCommand::Disconnect => return Ok(()),
-                    VncCommand::KeyEvent { down, keysym } => {
-                        send_key_event(&mut stream, down, keysym).await?;
-                    }
-                    VncCommand::PointerEvent { buttons, x, y } => {
-                        send_pointer_event(&mut stream, buttons, x, y).await?;
-                    }
-                    VncCommand::SetClipboard(text) => {
-                        // Invalid local text must not terminate a working session.
-                        match clipboard.send_local(&mut stream, text).await {
-                            Ok(()) => {
-                                let _ = event_tx.send(VncEvent::ClipboardStatus {
-                                    message: "Clipboard transfer offered to the server".to_string(),
-                                    is_error: false,
-                                });
-                            }
-                            Err(error) => {
-                                if error.downcast_ref::<std::io::Error>().is_some() {
-                                    return Err(error);
-                                }
-                                warn!("Cannot send clipboard: {error}");
-                                let _ = event_tx.send(VncEvent::ClipboardStatus {
-                                    message: format!("Cannot send clipboard: {error}"),
-                                    is_error: true,
-                                });
-                            }
-                        }
-                    }
-                    VncCommand::TypeText(text) => {
-                        stream.write_all(&text.wire_bytes()).await?;
-                        let _ = event_tx.send(VncEvent::ClipboardStatus {
-                            message: format!("Sent {} text key taps to the server", text.len()),
-                            is_error: false,
-                        });
-                    }
-                    // ProvidePassword is only consumed during security negotiation;
-                    // ignore any stray commands that arrive after auth completes.
-                    VncCommand::ProvidePassword(_) | VncCommand::ProvideCredentials(_) => {}
+            if !drain_commands(&mut stream, &mut clipboard, &event_tx, &cmd_rx).await? {
+                return Ok(());
+            }
+
+            // Reserve capacity before requesting more pixels. When the UI is
+            // behind, keep reading server controls and flushing local input;
+            // never block this current-thread runtime on the event channel.
+            if request_permit.is_none() {
+                if let Ok(permit) = update_credits.clone().try_acquire_owned() {
+                    send_fb_update_request(
+                        &mut stream,
+                        !request_full,
+                        0,
+                        0,
+                        fb.width as u16,
+                        fb.height as u16,
+                    )
+                    .await?;
+                    request_full = false;
+                    request_permit = Some(permit);
                 }
             }
 
@@ -197,6 +185,25 @@ impl VncClient {
                 };
             match msg_type {
                 server_msg::FB_UPDATE => {
+                    // Servers may send an update without a request. Accept it,
+                    // but do not decode/allocate its payload without a credit.
+                    // Later incoming controls are necessarily behind this TCP
+                    // payload; outgoing input and disconnect remain serviced.
+                    let permit = loop {
+                        // Check shutdown before acquiring a credit: dropping
+                        // the owner can both enqueue Disconnect and release
+                        // queued fences, even when no payload follows a header.
+                        if !drain_commands(&mut stream, &mut clipboard, &event_tx, &cmd_rx).await? {
+                            return Ok(());
+                        }
+                        if let Some(permit) = request_permit.take() {
+                            break permit;
+                        }
+                        if let Ok(permit) = update_credits.clone().try_acquire_owned() {
+                            break permit;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    };
                     stream.read_u8().await?;
                     let n_rects = stream.read_u16().await?;
                     ensure!(
@@ -289,7 +296,7 @@ impl VncClient {
                                 fb.resize(rw as u32, rh as u32);
                                 dirty.clear();
                                 resized = true;
-                                let _ = event_tx.send(VncEvent::DesktopSize(rw as u32, rh as u32));
+                                send_event(&event_tx, VncEvent::DesktopSize(rw as u32, rh as u32))?;
                             }
                             enc::CURSOR => {
                                 // RichCursor pseudo-encoding: read and discard cursor image + bitmask.
@@ -329,20 +336,18 @@ impl VncClient {
                                 }
                             })
                             .collect();
-                        let _ = event_tx.send(VncEvent::FramebufferRects(rects));
+                        send_event(&event_tx, VncEvent::FramebufferRects(rects))?;
                     }
 
-                    // Resizing discards old pixels. Request one full refresh, only after
-                    // consuming the entire update, rather than also queuing an incremental.
-                    send_fb_update_request(
-                        &mut stream,
-                        !resized,
-                        0,
-                        0,
-                        fb.width as u16,
-                        fb.height as u16,
-                    )
-                    .await?;
+                    // FIFO fence follows every event in this update, including
+                    // resize-only, cursor-only and empty updates. Dequeuing it
+                    // does not release capacity: the consumer must finish the
+                    // preceding pixel/resize work before dropping its permit.
+                    send_event(&event_tx, VncEvent::UpdateComplete(permit))?;
+
+                    // A full refresh remains required across unsolicited updates
+                    // until that request is actually sent with the final size.
+                    request_full |= resized;
                 }
 
                 server_msg::SET_COLOUR_MAP_ENTRIES => {
@@ -359,7 +364,7 @@ impl VncClient {
 
                 server_msg::SERVER_CUT_TEXT => {
                     if let Some(text) = clipboard.receive(&mut stream).await? {
-                        let _ = event_tx.send(VncEvent::ClipboardText(text));
+                        send_event(&event_tx, VncEvent::ClipboardText(text))?;
                     }
                 }
 
@@ -385,6 +390,78 @@ fn collapse_full_frame_dirty_rects(dirty: &mut Vec<(u16, u16, u16, u16)>, width:
         dirty.clear();
         dirty.push(full_frame);
     }
+}
+
+// Run while waiting for server messages *and* while an unsolicited update waits
+// for a UI credit. Dropping the command owner is a disconnect, not an idle loop.
+async fn drain_commands<S: tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    clipboard: &mut Clipboard,
+    event_tx: &Sender<VncEvent>,
+    cmd_rx: &Receiver<VncCommand>,
+) -> Result<bool> {
+    loop {
+        let cmd = match cmd_rx.try_recv() {
+            Ok(cmd) => cmd,
+            Err(crossbeam_channel::TryRecvError::Empty) => return Ok(true),
+            Err(crossbeam_channel::TryRecvError::Disconnected) => return Ok(false),
+        };
+        match cmd {
+            VncCommand::Disconnect => return Ok(false),
+            VncCommand::KeyEvent { down, keysym } => {
+                send_key_event(stream, down, keysym).await?;
+            }
+            VncCommand::PointerEvent { buttons, x, y } => {
+                send_pointer_event(stream, buttons, x, y).await?;
+            }
+            VncCommand::SetClipboard(text) => {
+                // Invalid local text must not terminate a working session.
+                match clipboard.send_local(stream, text).await {
+                    Ok(()) => {
+                        send_event(
+                            event_tx,
+                            VncEvent::ClipboardStatus {
+                                message: "Clipboard transfer offered to the server".to_string(),
+                                is_error: false,
+                            },
+                        )?;
+                    }
+                    Err(error) => {
+                        if error.downcast_ref::<std::io::Error>().is_some() {
+                            return Err(error);
+                        }
+                        warn!("Cannot send clipboard: {error}");
+                        send_event(
+                            event_tx,
+                            VncEvent::ClipboardStatus {
+                                message: format!("Cannot send clipboard: {error}"),
+                                is_error: true,
+                            },
+                        )?;
+                    }
+                }
+            }
+            VncCommand::TypeText(text) => {
+                stream.write_all(&text.wire_bytes()).await?;
+                send_event(
+                    event_tx,
+                    VncEvent::ClipboardStatus {
+                        message: format!("Sent {} text key taps to the server", text.len()),
+                        is_error: false,
+                    },
+                )?;
+            }
+            // ProvidePassword is only consumed during security negotiation;
+            // ignore any stray commands that arrive after auth completes.
+            VncCommand::ProvidePassword(_) | VncCommand::ProvideCredentials(_) => {}
+        }
+    }
+}
+
+fn send_event(event_tx: &Sender<VncEvent>, event: VncEvent) -> Result<()> {
+    event_tx
+        .send(event)
+        .map_err(|_| anyhow::anyhow!("VNC event consumer disconnected"))
 }
 
 /// RFC 6143 requires unknown 3.x versions to use the 3.3 handshake. The
@@ -495,6 +572,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    mod backpressure;
     mod desktop_size;
     mod text_input;
 
@@ -569,6 +647,10 @@ mod tests {
     async fn next_event(receiver: &Receiver<VncEvent>) -> VncEvent {
         loop {
             if let Ok(event) = receiver.try_recv() {
+                if let VncEvent::UpdateComplete(permit) = event {
+                    drop(permit);
+                    continue;
+                }
                 return event;
             }
             tokio::time::sleep(Duration::from_millis(1)).await;
@@ -706,7 +788,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), async {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let connection = params(listener.local_addr().unwrap().port());
-            let (events_tx, _) = crossbeam_channel::unbounded();
+            let (events_tx, _events_rx) = crossbeam_channel::unbounded();
             let (_commands_tx, commands_rx) = crossbeam_channel::unbounded();
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
