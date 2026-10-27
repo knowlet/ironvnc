@@ -133,6 +133,100 @@ fn assert_pixels(event: &VncEvent, expected: &[(u32, u32, [u8; 4])]) {
     }
 }
 
+fn raw_row(pixels: &[[u8; 4]]) -> Vec<u8> {
+    let payload: Vec<u8> = pixels
+        .iter()
+        .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], 0])
+        .collect();
+    rect(enc::RAW, (0, 0, pixels.len() as u16, 1), &payload)
+}
+
+fn assert_full_row(event: &VncEvent, pixels: &[[u8; 4]]) {
+    let VncEvent::FramebufferRects(rectangles) = event else {
+        panic!("expected framebuffer rectangles");
+    };
+    assert_eq!(rectangles.len(), 1);
+    let rectangle = &rectangles[0];
+    assert_eq!(
+        (rectangle.x, rectangle.y, rectangle.w, rectangle.h),
+        (0, 0, pixels.len() as u32, 1)
+    );
+    assert_eq!(rectangle.rgba, pixels.concat());
+}
+
+#[tokio::test]
+async fn full_frame_damage_uses_final_pixels_after_later_raw_and_copyrect() {
+    for (rectangles, expected) in [
+        (vec![pixel(0, 0, GREEN), raw_row(&[RED, BLUE])], [RED, BLUE]),
+        (
+            vec![raw_row(&[RED, BLUE]), pixel(0, 0, GREEN)],
+            [GREEN, BLUE],
+        ),
+        (
+            vec![
+                raw_row(&[RED, BLUE]),
+                pixel(0, 0, GREEN),
+                rect(enc::COPY_RECT, (1, 0, 1, 1), &[0, 0, 0, 0]),
+            ],
+            [GREEN, GREEN],
+        ),
+    ] {
+        let events = exchange(vec![(vec![update(rectangles)], request(true, 2, 1))]).await;
+        assert_eq!(events.len(), 1);
+        assert_full_row(&events[0], &expected);
+    }
+}
+
+#[tokio::test]
+async fn full_frame_damage_does_not_merge_non_full_rectangles() {
+    let events = exchange(vec![(
+        vec![update(vec![
+            pixel(0, 0, RED),
+            pixel(1, 0, BLUE),
+            pixel(0, 0, GREEN),
+        ])],
+        request(true, 2, 1),
+    )])
+    .await;
+    assert_eq!(events.len(), 1);
+    assert_pixels(&events[0], &[(0, 0, GREEN), (1, 0, BLUE), (0, 0, GREEN)]);
+}
+
+#[tokio::test]
+async fn full_frame_damage_never_crosses_resize_or_update_boundaries() {
+    for width in [2, 3] {
+        let expected_full = vec![RED; width as usize];
+        let events = exchange(vec![
+            (
+                vec![update(vec![
+                    raw_row(&[RED, BLUE]),
+                    resize(width, 1),
+                    pixel(0, 0, GREEN),
+                ])],
+                request(false, width, 1),
+            ),
+            (
+                vec![update(vec![raw_row(&expected_full), pixel(1, 0, BLUE)])],
+                request(true, width, 1),
+            ),
+            (
+                vec![update(vec![pixel(0, 0, GREEN)])],
+                request(true, width, 1),
+            ),
+        ])
+        .await;
+        assert_eq!(events.len(), 4);
+        assert_size(&events[0], width as u32, 1);
+        // Even a same-size DesktopSize invalidates the earlier full rectangle.
+        assert_pixels(&events[1], &[(0, 0, GREEN)]);
+        let mut expected_full = expected_full;
+        expected_full[1] = BLUE;
+        // The next update cannot mutate an already-queued full-frame snapshot.
+        assert_full_row(&events[2], &expected_full);
+        assert_pixels(&events[3], &[(0, 0, GREEN)]);
+    }
+}
+
 #[tokio::test]
 async fn desktop_size_alone_or_last_discards_old_dirty_rectangles() {
     for with_old_rectangle in [false, true] {

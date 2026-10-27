@@ -310,6 +310,11 @@ impl VncClient {
                     }
 
                     if !dirty.is_empty() {
+                        collapse_full_frame_dirty_rects(
+                            &mut dirty,
+                            fb.width as u16,
+                            fb.height as u16,
+                        );
                         let rects: Vec<FbRect> = dirty
                             .into_iter()
                             .map(|(rx, ry, rw, rh)| {
@@ -363,6 +368,22 @@ impl VncClient {
                 }
             }
         }
+    }
+}
+
+/// Dirty regions are snapshotted only after the entire update has been decoded.
+/// A full-frame region therefore already includes every later write or CopyRect;
+/// copying the other regions would just enqueue redundant pixels for the UI.
+/// DesktopSize clears the dirty list before this runs, so coverage cannot cross
+/// a resize or update boundary. Leave all non-full-frame damage unchanged.
+fn collapse_full_frame_dirty_rects(dirty: &mut Vec<(u16, u16, u16, u16)>, width: u16, height: u16) {
+    if dirty.len() < 2 {
+        return;
+    }
+    let full_frame = (0, 0, width, height);
+    if dirty.contains(&full_frame) {
+        dirty.clear();
+        dirty.push(full_frame);
     }
 }
 
@@ -586,6 +607,42 @@ mod tests {
         assert!(validate_rectangle(&fb, 0, 0, 2, 1).is_ok());
         assert!(validate_rectangle(&fb, u16::MAX, 0, 2, 1).is_err());
         assert!(validate_rectangle(&fb, 1, 0, 2, 1).is_err());
+    }
+
+    #[test]
+    fn full_frame_dirty_collapse_preserves_non_full_damage_and_order() {
+        for original in [
+            vec![],
+            vec![(0, 0, 8, 6)],
+            vec![(1, 1, 2, 2)],
+            // Their union covers the frame, but neither is a full-frame rect.
+            vec![(0, 0, 4, 6), (4, 0, 4, 6)],
+            vec![(0, 0, 6, 6), (2, 0, 6, 6), (0, 0, 6, 6)],
+            // An old-size full rect must not count as current-size coverage.
+            vec![(0, 0, 4, 3), (1, 1, 2, 2)],
+        ] {
+            let mut dirty = original.clone();
+            collapse_full_frame_dirty_rects(&mut dirty, 8, 6);
+            assert_eq!(dirty, original);
+        }
+    }
+
+    #[test]
+    fn full_frame_dirty_collapse_keeps_one_final_snapshot_at_any_position() {
+        let full = (0, 0, 8, 6);
+        let partial = (1, 1, 2, 2);
+        for mut dirty in [
+            vec![full, partial],
+            vec![partial, full],
+            vec![partial, full, partial],
+            vec![full, partial, full],
+        ] {
+            collapse_full_frame_dirty_rects(&mut dirty, 8, 6);
+            assert_eq!(dirty, vec![full]);
+        }
+        let mut dirty = vec![(0, 0, u16::MAX, 1), (1, 0, 1, 1)];
+        collapse_full_frame_dirty_rects(&mut dirty, u16::MAX, 1);
+        assert_eq!(dirty, vec![(0, 0, u16::MAX, 1)]);
     }
 
     #[tokio::test]
