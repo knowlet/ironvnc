@@ -37,9 +37,10 @@ pub enum VncEvent {
     /// Only the rectangles that changed this update — applied as partial
     /// texture updates so we never re-upload the whole framebuffer.
     FramebufferRects(Vec<FbRect>),
+    /// Optional timing metadata preceding this update's pixel snapshots.
+    ProfileUpdate(crate::profiling::UpdateProfile),
     /// FIFO completion fence. Keep the non-cloneable credit until all preceding
     /// events in this update have been applied, not merely dequeued.
-    ProfileUpdate(crate::profiling::UpdateProfile),
     UpdateComplete(tokio::sync::OwnedSemaphorePermit),
     DesktopName(String),
     /// Server sent clipboard text.
