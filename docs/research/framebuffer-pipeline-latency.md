@@ -145,3 +145,24 @@ Next acceptance step: a permitted native-GPU environment should timestamp textur
 upload/submission and presentation separately, with identical server/input traces.
 The current evidence does not close that acceptance gap or justify relaxing the
 two-credit backpressure mechanism.
+
+## Publication provenance
+
+Local HTTPS Git push had no configured authentication; publication used the existing
+GitHub connector without changing credentials. The connector creates new commit IDs.
+Every published implementation tree was checked byte-for-byte by Git tree SHA against
+the locally verified commit. Local measurements still refer to the actual local
+commits and executable hashes above, not a remote execution.
+
+| Actual local verification commit | Published equivalent commit |
+|---|---|
+| `0524df23bb4f3860acb8d45445a413859c32593a` | [`d70daded8649ae4de1eea16aecabee7a18eddd07`](https://github.com/knowlet/ironvnc/commit/d70daded8649ae4de1eea16aecabee7a18eddd07) |
+| `d269ee7bea297003dc775feb0e932af644ee12d8` | [`539ca344398effd5c9420270e2b1ba222da9cf6f`](https://github.com/knowlet/ironvnc/commit/539ca344398effd5c9420270e2b1ba222da9cf6f) |
+| `c48c01db1a2e31a493fd54c83f2522138dd4a09f` | [`6e23f6d336637504852f27d71ccd28f486e643f3`](https://github.com/knowlet/ironvnc/commit/6e23f6d336637504852f27d71ccd28f486e643f3) |
+| `47e3fa6350a5c7f0b9f3d627952ba1ab0ad31885` | [`d383bfdf280aaa4a16fac49cbf9e18510d9ab950`](https://github.com/knowlet/ironvnc/commit/d383bfdf280aaa4a16fac49cbf9e18510d9ab950) |
+| `45e8a8b94e7a5cde0270b4e1b904213c433f2581` | [`9290a6c76f1e2e5b1f4a7c87025c07fc8db07aaa`](https://github.com/knowlet/ironvnc/commit/9290a6c76f1e2e5b1f4a7c87025c07fc8db07aaa) |
+
+For reproduction, check out published measurement reference `d70daded8649ae4de1eea16aecabee7a18eddd07`
+and published measured implementation `d383bfdf280aaa4a16fac49cbf9e18510d9ab950`. Exact-head CI of the final
+published head is a separate check; identical trees do not imply identical artifacts,
+runtime environments, GPU acceptance, or CI results.
