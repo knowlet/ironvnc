@@ -37,7 +37,7 @@ where
 /// The padding byte is not alpha: every decoded network pixel is opaque.
 fn rgba_from_wire(mut buf: Vec<u8>, pf: &PixelFormat) -> Vec<u8> {
     if pf.wire_bytes() == PixelFormat::preferred().wire_bytes() {
-        for pixel in buf.chunks_exact_mut(4) {
+        for pixel in buf.as_chunks_mut::<4>().0 {
             pixel.swap(0, 2);
             pixel[3] = 255;
         }
@@ -45,7 +45,7 @@ fn rgba_from_wire(mut buf: Vec<u8>, pf: &PixelFormat) -> Vec<u8> {
     }
     let bpp = (pf.bits_per_pixel / 8) as usize;
     let mut rgba = vec![0; buf.len() / bpp * 4];
-    for (wire, out) in buf.chunks_exact(bpp).zip(rgba.chunks_exact_mut(4)) {
+    for (wire, out) in buf.chunks_exact(bpp).zip(rgba.as_chunks_mut::<4>().0) {
         let (r, g, b) = pf.to_rgb(read_pixel(wire, bpp, pf.big_endian));
         out.copy_from_slice(&[r, g, b, 255]);
     }
