@@ -4,7 +4,12 @@ use crate::sessions::{self, Session, SessionIdentity};
 use crate::transfer::{RemoteEntry, TransferEvent, TransferParams, TransferSession};
 use egui::{Color32, Key, Modifiers, Rect, Sense, TextureHandle, TextureOptions, Vec2};
 
+mod profile_cpu;
+pub use profile_cpu::run_cpu_profile;
+
 pub struct VncApp {
+    profile: profile_cpu::UiProfile,
+    persist_sessions: bool,
     // Toolbar address field ("host" or "host:port")
     address_input: String,
 
@@ -67,9 +72,13 @@ impl VncApp {
     }
 
     fn from_initial(initial: Option<ConnectionParams>) -> Self {
-        let sessions = sessions::load();
+        Self::with_sessions(initial, sessions::load())
+    }
 
+    fn with_sessions(initial: Option<ConnectionParams>, sessions: Vec<Session>) -> Self {
         let mut app = Self {
+            profile: Default::default(),
+            persist_sessions: true,
             address_input: String::new(),
             connection: None,
             texture: None,
@@ -306,8 +315,11 @@ impl VncApp {
     // ── Event processing ──────────────────────────────────────────────────────
 
     fn process_events(&mut self, ctx: &egui::Context) {
+        // Keep one finite snapshot: its completion credits remain held during
+        // collection. Releasing them in try_iter would let a fast producer turn
+        // this UI pass (and egui's pending texture deltas) into an unbounded drain.
         let events: Vec<VncEvent> = match &self.connection {
-            Some(conn) => conn.event_rx.try_iter().collect(),
+            Some(conn) => conn.event_rx.try_iter().take(conn.event_rx.len()).collect(),
             None => return,
         };
 
@@ -338,6 +350,7 @@ impl VncApp {
                     self.remember_session();
                 }
                 VncEvent::FramebufferRects(rects) => {
+                    self.profile.pixels_start();
                     // Apply each changed rectangle as a partial texture update —
                     // no full-frame re-upload.
                     if let Some(tex) = &mut self.texture {
@@ -353,18 +366,35 @@ impl VncApp {
                             {
                                 continue;
                             }
+                            let conversion_start = self
+                                .profile
+                                .active
+                                .as_ref()
+                                .map(|_| std::time::Instant::now());
                             let image = egui::ColorImage::from_rgba_unmultiplied(
                                 [r.w as usize, r.h as usize],
                                 &r.rgba,
                             );
+                            self.profile.add_conversion(conversion_start);
+                            let manager_start = self
+                                .profile
+                                .active
+                                .as_ref()
+                                .map(|_| std::time::Instant::now());
                             tex.set_partial(
                                 [r.x as usize, r.y as usize],
                                 image,
                                 TextureOptions::LINEAR,
                             );
+                            self.profile.add_manager(manager_start);
                         }
                     }
                     ctx.request_repaint();
+                }
+                VncEvent::ProfileUpdate(profile) => self.profile.start(profile),
+                VncEvent::UpdateComplete(permit) => {
+                    self.profile.finish();
+                    drop(permit);
                 }
                 VncEvent::ClipboardText(text) => {
                     let result = self.local_clipboard().and_then(|cb| {
@@ -826,6 +856,9 @@ impl VncApp {
     /// updates the password on an existing one. Called once a connection is
     /// established (so we never save a host that failed to connect).
     fn remember_session(&mut self) {
+        if !self.persist_sessions {
+            return;
+        }
         if self.current_host.is_empty() {
             return;
         }
@@ -1567,6 +1600,9 @@ impl RemoteKeyboard {
 }
 
 #[cfg(test)]
+mod update_tests;
+
+#[cfg(test)]
 mod input_tests {
     use super::*;
     use crate::connection::VncCommand;
@@ -1575,7 +1611,7 @@ mod input_tests {
         let mut app = VncApp::from_initial(None);
         let (_, event_rx) = crossbeam_channel::unbounded();
         let (cmd_tx, cmd_rx) = crossbeam_channel::unbounded();
-        app.connection = Some(VncConnection { event_rx, cmd_tx });
+        app.connection = Some(VncConnection::from_channels(event_rx, cmd_tx));
         app.texture = Some(ctx.load_texture(
             "paste-test",
             egui::ColorImage::new([2, 2], Color32::BLACK),

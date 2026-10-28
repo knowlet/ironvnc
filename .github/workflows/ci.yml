@@ -86,6 +86,9 @@ jobs:
           rustc --version --verbose
           cargo --version
 
+      - name: Test CPU benchmark harness (no GPU)
+        run: ${{ matrix.python }} scripts/pipeline_latency_bench.py --self-test
+
       - name: Check formatting
         run: cargo fmt --all -- --check
 
