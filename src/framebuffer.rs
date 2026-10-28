@@ -89,12 +89,13 @@ impl Framebuffer {
         let y = y.min(self.height);
         let w = w.min(self.width - x);
         let h = h.min(self.height - y);
-        let mut out = vec![0u8; (w * h * 4) as usize];
+        // Each byte is initialized exactly once by extend_from_slice. Keep the
+        // same tightly packed snapshot without zeroing data immediately overwritten.
+        let mut out = Vec::with_capacity((w * h * 4) as usize);
         let row_bytes = (w * 4) as usize;
         for row in 0..h {
             let src = (((y + row) * self.width + x) * 4) as usize;
-            let dst = (row * w * 4) as usize;
-            out[dst..dst + row_bytes].copy_from_slice(&self.pixels[src..src + row_bytes]);
+            out.extend_from_slice(&self.pixels[src..src + row_bytes]);
         }
         (w, h, out)
     }
@@ -184,5 +185,41 @@ mod tests {
     #[test]
     fn copy_rect_matches_snapshot_for_4k_scrolls_and_window_moves() {
         check_desktop_scrolls_and_window_moves(3840, 2160);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use super::*;
+    #[test]
+    fn snapshots_match_independent_pixel_oracle_including_clamping_and_alpha() {
+        let mut fb = Framebuffer::new(5, 4);
+        for (i, value) in fb.pixels.iter_mut().enumerate() {
+            *value = (i * 37) as u8;
+        }
+        for x in 0..=7 {
+            for y in 0..=6 {
+                for w in 0..=7 {
+                    for h in 0..=6 {
+                        let (got_w, got_h, got) = fb.sub_rgba(x, y, w, h);
+                        let left = x.min(5);
+                        let top = y.min(4);
+                        let width = w.min(5 - left);
+                        let height = h.min(4 - top);
+                        let expected: Vec<_> = (top..top + height)
+                            .flat_map(|row| {
+                                (left..left + width).flat_map(move |col| {
+                                    (0..4).map(move |c| ((row * 5 + col) * 4 + c) as usize)
+                                })
+                            })
+                            .map(|i| fb.pixels[i])
+                            .collect();
+                        assert_eq!((got_w, got_h, got), (width, height, expected));
+                    }
+                }
+            }
+        }
+        fb.resize(2, 3);
+        assert_eq!(fb.sub_rgba(0, 0, 2, 3), (2, 3, vec![0; 24]));
     }
 }
