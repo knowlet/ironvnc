@@ -39,6 +39,7 @@ pub enum VncEvent {
     FramebufferRects(Vec<FbRect>),
     /// FIFO completion fence. Keep the non-cloneable credit until all preceding
     /// events in this update have been applied, not merely dequeued.
+    ProfileUpdate(crate::profiling::UpdateProfile),
     UpdateComplete(tokio::sync::OwnedSemaphorePermit),
     DesktopName(String),
     /// Server sent clipboard text.

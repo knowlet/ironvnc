@@ -169,3 +169,58 @@ fn actual_ui_retains_fences_for_the_entire_collected_snapshot() {
         [Color32::RED, Color32::GREEN]
     );
 }
+
+#[test]
+fn profiling_metadata_does_not_release_credits_or_change_texture_pixels() {
+    use crate::profiling::UpdateProfile;
+    use std::time::{Duration, Instant};
+    let ctx = egui::Context::default();
+    let mut app = VncApp::with_sessions(None, Vec::new());
+    let (event_tx, event_rx) = crossbeam_channel::unbounded();
+    let (cmd_tx, _commands) = crossbeam_channel::unbounded();
+    app.connection = Some(VncConnection::from_channels(event_rx, cmd_tx));
+    let credits = Arc::new(Semaphore::new(2));
+    let permit = credits.clone().try_acquire_owned().unwrap();
+    event_tx.send(VncEvent::DesktopSize(1, 1)).unwrap();
+    event_tx
+        .send(VncEvent::ProfileUpdate(UpdateProfile {
+            sequence: 1,
+            started: Instant::now(),
+            queued: Instant::now(),
+            receive: Duration::ZERO,
+            decode_apply: Duration::ZERO,
+            framebuffer: Duration::ZERO,
+            framebuffer_complete: true,
+            snapshot: Duration::ZERO,
+            credit_wait: Duration::ZERO,
+            payload_bytes: 4,
+        }))
+        .unwrap();
+    ctx.begin_pass(Default::default());
+    app.process_events(&ctx);
+    drop(ctx.end_pass());
+    assert_eq!(credits.available_permits(), 1);
+    event_tx.send(pixel(0, [255, 0, 0, 255])).unwrap();
+    event_tx.send(VncEvent::UpdateComplete(permit)).unwrap();
+    ctx.begin_pass(Default::default());
+    app.process_events(&ctx);
+    let out = ctx.end_pass();
+    let image = &out.textures_delta.set.last().unwrap().1.image;
+    let egui::ImageData::Color(image) = image else {
+        panic!("color expected")
+    };
+    assert_eq!(image.pixels, [Color32::RED]);
+    assert_eq!(credits.available_permits(), 2);
+    assert!(app.profile.active.is_none());
+}
+
+#[test]
+fn diagnostic_app_does_not_remember_fixture_sessions() {
+    let mut app = VncApp::with_sessions(None, Vec::new());
+    app.persist_sessions = false;
+    app.current_host = "127.0.0.1".into();
+    app.current_port = 5900;
+    app.desktop_name = "synthetic fixture".into();
+    app.remember_session();
+    assert!(app.sessions.is_empty());
+}

@@ -30,7 +30,10 @@ where
         rgba[i * 4 + 3] = 255;
     }
 
-    fb.blit_rgba(x as u32, y as u32, w as u32, h as u32, &rgba);
+    {
+        let _timing = crate::profiling::framebuffer_scope();
+        fb.blit_rgba(x as u32, y as u32, w as u32, h as u32, &rgba);
+    }
     Ok(())
 }
 

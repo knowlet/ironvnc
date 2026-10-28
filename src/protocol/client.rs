@@ -1,5 +1,6 @@
 use crate::connection::{ConnectionParams, FbRect, VncCommand, VncEvent};
 use crate::framebuffer::Framebuffer;
+use crate::profiling::{self, TimedStream, UpdateProfile};
 use crate::protocol::{
     clipboard::Clipboard,
     encoding::{copyrect, hextile, raw, tight, zrle},
@@ -10,6 +11,7 @@ use anyhow::{bail, ensure, Result};
 use crossbeam_channel::{Receiver, Sender};
 use flate2::Decompress;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tight::TightState;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -58,7 +60,7 @@ impl VncClient {
         stream.write_all(reply.as_bytes()).await?;
 
         // --- Security (may replace the stream with an AES-encrypted channel) ---
-        let mut stream = security::negotiate(
+        let stream = security::negotiate(
             stream,
             params.username.as_deref(),
             params.password.as_deref(),
@@ -67,6 +69,10 @@ impl VncClient {
             &cmd_rx,
         )
         .await?;
+
+        let profile_enabled = profiling::enabled();
+        let mut profile_sequence = 0u64;
+        let mut stream = TimedStream::new(stream);
 
         // --- ClientInit ---
         stream.write_u8(1).await?;
@@ -185,6 +191,7 @@ impl VncClient {
                 };
             match msg_type {
                 server_msg::FB_UPDATE => {
+                    let profile_started = profile_enabled.then(Instant::now);
                     // Servers may send an update without a request. Accept it,
                     // but do not decode/allocate its payload without a credit.
                     // Later incoming controls are necessarily behind this TCP
@@ -204,12 +211,17 @@ impl VncClient {
                         }
                         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                     };
+                    let credit_wait = profile_started.map_or(Duration::ZERO, |s| s.elapsed());
+                    let decode_started = profile_enabled.then(Instant::now);
+                    stream.begin_update(profile_enabled);
+                    let _framebuffer_measurement = profiling::begin_framebuffer(profile_enabled);
                     stream.read_u8().await?;
                     let n_rects = stream.read_u16().await?;
                     ensure!(
                         n_rects <= MAX_UPDATE_RECTANGLES,
                         "Framebuffer update has too many rectangles"
                     );
+                    let mut framebuffer_complete = true;
                     let mut update_pixels = 0u64;
                     let mut resized = false;
                     let mut resize_count = 0u16;
@@ -238,6 +250,12 @@ impl VncClient {
                             );
                         }
 
+                        if matches!(
+                            encoding,
+                            enc::ZRLE | enc::HEXTILE | enc::TIGHT | enc::DESKTOP_SIZE
+                        ) {
+                            framebuffer_complete = false;
+                        }
                         match encoding {
                             enc::RAW => {
                                 raw::decode(&mut stream, &mut fb, &pf, rx, ry, rw, rh).await?;
@@ -316,6 +334,11 @@ impl VncClient {
                         }
                     }
 
+                    let receive = stream.finish_update();
+                    let framebuffer = profiling::finish_framebuffer();
+                    let decode_apply = decode_started.map_or(Duration::ZERO, |s| s.elapsed());
+                    let snapshot_started = profile_enabled.then(Instant::now);
+                    let mut prepared_rects = None;
                     if !dirty.is_empty() {
                         collapse_full_frame_dirty_rects(
                             &mut dirty,
@@ -336,6 +359,32 @@ impl VncClient {
                                 }
                             })
                             .collect();
+                        prepared_rects = Some(rects);
+                    }
+
+                    if let Some(started) = profile_started {
+                        profile_sequence += 1;
+                        let snapshot = snapshot_started.unwrap().elapsed();
+                        let payload_bytes = prepared_rects
+                            .as_ref()
+                            .map_or(0, |rs| rs.iter().map(|r| r.rgba.len()).sum());
+                        send_event(
+                            &event_tx,
+                            VncEvent::ProfileUpdate(UpdateProfile {
+                                sequence: profile_sequence,
+                                started,
+                                queued: Instant::now(),
+                                receive,
+                                decode_apply,
+                                snapshot,
+                                framebuffer,
+                                framebuffer_complete,
+                                credit_wait,
+                                payload_bytes,
+                            }),
+                        )?;
+                    }
+                    if let Some(rects) = prepared_rects {
                         send_event(&event_tx, VncEvent::FramebufferRects(rects))?;
                     }
 

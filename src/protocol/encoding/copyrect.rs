@@ -21,6 +21,7 @@ where
             "CopyRect is outside the framebuffer"
         );
     }
+    let _timing = crate::profiling::framebuffer_scope();
     fb.copy_rect(
         dst_x as u32,
         dst_y as u32,
