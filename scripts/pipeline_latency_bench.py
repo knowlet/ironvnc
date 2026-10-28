@@ -17,6 +17,7 @@ import socket
 import signal
 import struct
 import subprocess
+import sys
 import time
 
 PIXEL_FORMAT = struct.pack(">BBBBHHHBBB3x", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
@@ -153,7 +154,32 @@ def summarize(rows, source, expected, warmup, elapsed, rss_kib, returncode, erro
             "latency_ms": stages}
 
 
+def rss_backend():
+    """Select before binding sockets; BSD time does not support GNU -f/-o."""
+    if sys.platform not in ("linux", "darwin"):
+        raise RuntimeError("CPU benchmark RSS/process cleanup supports Linux and macOS only")
+    return "gnu-time" if sys.platform == "linux" and Path("/usr/bin/time").exists() else "resource"
+
+
+def rss_command(command, rss_file, backend):
+    if backend == "gnu-time":
+        return ["/usr/bin/time", "-f", "%M", "-o", str(rss_file), "--"] + command
+    # Fresh process per run: RUSAGE_CHILDREN must not retain earlier maxima.
+    # Linux getrusage(2): KiB. XNU calcru uses resident_size_max (bytes).
+    # https://man7.org/linux/man-pages/man2/getrusage.2.html
+    # https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_resource.c
+    # https://github.com/apple-oss-distributions/xnu/blob/main/osfmk/mach/task_info.h
+    divisor = 1024 if sys.platform == "darwin" else 1
+    wrapper = ("import resource,subprocess,sys; "
+               "r=subprocess.run(sys.argv[3:]); "
+               "rss=resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss; "
+               "open(sys.argv[1],'w').write(str(int(rss)//int(sys.argv[2]))); "
+               "sys.exit(r.returncode)")
+    return [sys.executable, "-c", wrapper, str(rss_file), str(divisor)] + command
+
+
 def run_one(binary, width, height, args, label, directory):
+    backend = rss_backend()  # Reject unsupported hosts before binding/launching.
     source, rows = [], []
     error = None
     rss_kib = None
@@ -171,17 +197,7 @@ def run_one(binary, width, height, args, label, directory):
             if getattr(args, "verify", None):
                 command.append("--profile-verify-pixels")
             rss_file = directory / f"{label}.rss.txt"
-            # GNU time measures child high-water RSS, excluding this Python server.
-            if Path("/usr/bin/time").exists():
-                command = ["/usr/bin/time", "-f", "%M", "-o", str(rss_file), "--"] + command
-            else:
-                # A fresh wrapper avoids cumulative RUSAGE_CHILDREN maxima across
-                # runs. On Linux ru_maxrss is KiB; it measures only the viewer child.
-                wrapper = ("import resource,subprocess,sys; "
-                           "r=subprocess.run(sys.argv[2:]); "
-                           "open(sys.argv[1],'w').write(str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss)); "
-                           "sys.exit(r.returncode)")
-                command = [os.sys.executable, "-c", wrapper, str(rss_file)] + command
+            command = rss_command(command, rss_file, backend)
             env = dict(os.environ, IRONVNC_PROFILE="1")
             try:
                 process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -248,7 +264,82 @@ def expected_pixels_hash(width, height, count):
     return f"{value:016x}"
 
 
+def rss_self_test():
+    import tempfile
+    import unittest
+    from unittest.mock import patch
+
+    class RssTests(unittest.TestCase):
+        def test_platform_selection(self):
+            for platform, exists, expected in (("linux", True, "gnu-time"),
+                                               ("linux", False, "resource"),
+                                               ("darwin", True, "resource"),
+                                               ("darwin", False, "resource")):
+                with patch.object(sys, "platform", platform), patch.object(Path, "exists", return_value=exists):
+                    self.assertEqual(rss_backend(), expected)
+
+        def test_gnu_command_layout(self):
+            self.assertEqual(rss_command(["viewer", "--profile-cpu"], Path("sample.rss"), "gnu-time"),
+                             ["/usr/bin/time", "-f", "%M", "-o", "sample.rss", "--", "viewer", "--profile-cpu"])
+
+        def test_unsupported_before_socket_or_child(self):
+            with patch.object(sys, "platform", "win32"), patch.object(socket, "socket") as sock, patch.object(subprocess, "Popen") as child:
+                with self.assertRaisesRegex(RuntimeError, "Linux and macOS"):
+                    run_one("unused", 3, 2, None, "unused", Path("unused"))
+                sock.assert_not_called()
+                child.assert_not_called()
+
+        def test_darwin_conversion_synthetic(self):
+            # Execute the generated wrapper with synthetic resource data, not
+            # Darwin native evidence. This also checks argv and child exit code.
+            import types
+            with patch.object(sys, "platform", "darwin"):
+                command = rss_command(["fake-child"], "unused", "resource")
+            fake_resource = types.SimpleNamespace(RUSAGE_CHILDREN=-1, getrusage=lambda _: types.SimpleNamespace(ru_maxrss=5 * 1024))
+            with patch.dict(sys.modules, resource=fake_resource), patch.object(sys, "argv", ["-c"] + command[3:]), patch.object(subprocess, "run", return_value=types.SimpleNamespace(returncode=7)), patch("builtins.open", unittest.mock.mock_open()) as output:
+                with self.assertRaises(SystemExit) as exit_result:
+                    exec(command[2], {})
+                self.assertEqual(exit_result.exception.code, 7)
+                output().write.assert_called_once_with("5")
+
+        @unittest.skipUnless(sys.platform in ("linux", "darwin"), "native resource requires Unix")
+        def test_native_resource_fresh_runs(self):
+            with tempfile.TemporaryDirectory() as tmp:
+                peaks = []
+                for size in (64 * 1024 * 1024, 1024):
+                    output = Path(tmp) / str(size)
+                    command = rss_command([sys.executable, "-c", f"x=bytearray({size}); print('child-ok')"], output, "resource")
+                    result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(result.stdout.strip(), "child-ok")
+                    peaks.append(int(output.read_text()))
+                self.assertGreater(peaks[0], 32 * 1024)
+                self.assertLess(peaks[0], 512 * 1024)  # catches Darwin bytes mislabeled as KiB
+                self.assertLess(peaks[1], peaks[0])  # no previous child high-water contamination
+
+        @unittest.skipUnless(sys.platform == "linux" and Path("/usr/bin/time").exists(), "GNU time Linux only")
+        def test_native_gnu_time(self):
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "rss"
+                result = subprocess.run(rss_command([sys.executable, "-c", "x=bytearray(8*1024*1024)"], output, "gnu-time"), capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertGreater(int(output.read_text()), 0)
+
+        @unittest.skipUnless(sys.platform in ("linux", "darwin"), "native resource requires Unix")
+        def test_native_resource_failure_exit(self):
+            with tempfile.TemporaryDirectory() as tmp:
+                output = Path(tmp) / "rss"
+                result = subprocess.run(rss_command([sys.executable, "-c", "raise SystemExit(7)"], output, "resource"), capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 7)
+                self.assertGreater(int(output.read_text()), 0)
+
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(RssTests))
+    if not result.wasSuccessful():
+        raise SystemExit(1)
+
+
 def self_test():
+    rss_self_test()
     assert len(initial_update(3, 2)) == 4 + 12 + 24
     assert copy_update(3, 2, 2)[:4] == b"\x00\x00\x00\x02"
     assert len(copy_update(3, 2, 2)) == 4 + 12 + 4 + 12 + 8
@@ -308,6 +399,10 @@ def main():
     if args.self_test:
         self_test()
         return
+    try:
+        rss_backend()
+    except RuntimeError as exc:
+        parser.error(str(exc))
     if not (0 < args.hz <= 1000 and 1 <= args.refresh_ms <= 1000 and 1 <= args.timeout <= 3600):
         parser.error("invalid pacing/refresh/timeout parameters")
     if args.verify:
