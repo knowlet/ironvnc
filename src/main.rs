@@ -7,6 +7,7 @@
 mod app;
 mod connection;
 mod framebuffer;
+mod profiling;
 mod protocol;
 mod sessions;
 mod transfer;
@@ -40,6 +41,17 @@ struct Args {
     #[arg(long, default_value_t = false)]
     test: bool,
 
+    /// CPU-only pipeline diagnostic against an explicit loopback fixture (no GPU).
+    #[arg(long, default_value_t = false, conflicts_with_all = ["test", "sftp_test", "session", "session_id", "password", "username"])]
+    profile_cpu: bool,
+    /// Separate correctness pass; extra CPU image storage invalidates performance comparisons.
+    #[arg(long, default_value_t = false, requires = "profile_cpu")]
+    profile_verify_pixels: bool,
+    #[arg(long, default_value_t = 120)]
+    profile_updates: usize,
+    #[arg(long, default_value_t = 16)]
+    profile_refresh_ms: u64,
+
     /// Headless SFTP test: connect over SSH and list the home directory.
     #[arg(long, default_value_t = false)]
     sftp_test: bool,
@@ -66,6 +78,19 @@ fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
+
+    if args.profile_cpu {
+        let host = args
+            .host
+            .ok_or_else(|| anyhow::anyhow!("--profile-cpu requires --host"))?;
+        return app::run_cpu_profile(
+            host,
+            args.port,
+            args.profile_updates,
+            args.profile_refresh_ms,
+            args.profile_verify_pixels,
+        );
+    }
 
     if args.test {
         let host = args
@@ -298,6 +323,8 @@ fn headless_test(
                 conn.disconnect();
                 return Ok(());
             }
+            Ok(VncEvent::UpdateComplete(permit)) => drop(permit),
+            Ok(VncEvent::ProfileUpdate(_)) => {}
             Ok(VncEvent::ClipboardText(_) | VncEvent::ClipboardStatus { .. }) => {}
             Ok(VncEvent::Error(e)) => {
                 println!("[test] FAIL: {e}");
