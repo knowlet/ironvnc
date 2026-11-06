@@ -994,11 +994,8 @@ impl VncApp {
             }
         }
         if let Some(i) = delete_idx {
-            self.sessions.remove(i);
-            if self.session_selected == Some(i) {
-                self.session_selected = None;
-                self.sf_editing = None;
-            }
+            self.remove_session(i);
+            connect_idx = Self::session_index_after_removal(connect_idx, i);
             let _ = sessions::save(&self.sessions);
         }
         if let Some(i) = connect_idx {
@@ -1009,7 +1006,31 @@ impl VncApp {
         }
     }
 
+    fn session_index_after_removal(index: Option<usize>, removed: usize) -> Option<usize> {
+        index.and_then(|i| {
+            if i == removed {
+                None
+            } else if i > removed {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        })
+    }
+
+    fn remove_session(&mut self, index: usize) {
+        self.sessions.remove(index);
+        // Keep every remaining index attached to the same saved account.
+        self.session_selected = Self::session_index_after_removal(self.session_selected, index);
+        self.sf_editing = Self::session_index_after_removal(self.sf_editing, index);
+    }
+
     fn save_session_form(&mut self) {
+        self.apply_session_form();
+        let _ = sessions::save(&self.sessions);
+    }
+
+    fn apply_session_form(&mut self) {
         // Preserve a previously-saved SSH username when editing.
         let ssh_user = self
             .sf_editing
@@ -1040,7 +1061,6 @@ impl VncApp {
             self.session_selected = Some(last);
             self.sf_editing = Some(last);
         }
-        let _ = sessions::save(&self.sessions);
     }
 
     // ── Start screen ──────────────────────────────────────────────────────────
