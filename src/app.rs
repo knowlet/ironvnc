@@ -863,7 +863,7 @@ impl VncApp {
             return;
         }
         // Other session windows may have saved since this window was opened.
-        self.sessions = sessions::load();
+        self.replace_sessions(sessions::load());
         if sessions::remember_connection(
             &mut self.sessions,
             &self.current_host,
@@ -874,6 +874,28 @@ impl VncApp {
         ) {
             let _ = sessions::save(&self.sessions);
         }
+    }
+
+    fn replace_sessions(&mut self, sessions: Vec<Session>) {
+        let remap = |index: Option<usize>| {
+            let previous = self.sessions.get(index?)?;
+            let mut matches = sessions.iter().enumerate().filter(|(_, session)| {
+                if previous.id.is_empty() {
+                    // Legacy records have no persistent ID. Only an exact,
+                    // unambiguous record can safely retain an editor target.
+                    *session == previous
+                } else {
+                    session.id == previous.id
+                }
+            });
+            let (index, _) = matches.next()?;
+            matches.next().is_none().then_some(index)
+        };
+        let selected = remap(self.session_selected);
+        let editing = remap(self.sf_editing);
+        self.sessions = sessions;
+        self.session_selected = selected;
+        self.sf_editing = editing;
     }
 
     // ── Sessions popup window ─────────────────────────────────────────────────
