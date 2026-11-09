@@ -863,7 +863,7 @@ impl VncApp {
             return;
         }
         // Other session windows may have saved since this window was opened.
-        self.sessions = sessions::load();
+        self.replace_sessions(sessions::load());
         if sessions::remember_connection(
             &mut self.sessions,
             &self.current_host,
@@ -874,6 +874,28 @@ impl VncApp {
         ) {
             let _ = sessions::save(&self.sessions);
         }
+    }
+
+    fn replace_sessions(&mut self, sessions: Vec<Session>) {
+        let remap = |index: Option<usize>| {
+            let previous = self.sessions.get(index?)?;
+            let mut matches = sessions.iter().enumerate().filter(|(_, session)| {
+                if previous.id.is_empty() {
+                    // Legacy records have no persistent ID. Only an exact,
+                    // unambiguous record can safely retain an editor target.
+                    *session == previous
+                } else {
+                    session.id == previous.id
+                }
+            });
+            let (index, _) = matches.next()?;
+            matches.next().is_none().then_some(index)
+        };
+        let selected = remap(self.session_selected);
+        let editing = remap(self.sf_editing);
+        self.sessions = sessions;
+        self.session_selected = selected;
+        self.sf_editing = editing;
     }
 
     // ── Sessions popup window ─────────────────────────────────────────────────
@@ -994,11 +1016,8 @@ impl VncApp {
             }
         }
         if let Some(i) = delete_idx {
-            self.sessions.remove(i);
-            if self.session_selected == Some(i) {
-                self.session_selected = None;
-                self.sf_editing = None;
-            }
+            self.remove_session(i);
+            connect_idx = Self::session_index_after_removal(connect_idx, i);
             let _ = sessions::save(&self.sessions);
         }
         if let Some(i) = connect_idx {
@@ -1009,7 +1028,31 @@ impl VncApp {
         }
     }
 
+    fn session_index_after_removal(index: Option<usize>, removed: usize) -> Option<usize> {
+        index.and_then(|i| {
+            if i == removed {
+                None
+            } else if i > removed {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        })
+    }
+
+    fn remove_session(&mut self, index: usize) {
+        self.sessions.remove(index);
+        // Keep every remaining index attached to the same saved account.
+        self.session_selected = Self::session_index_after_removal(self.session_selected, index);
+        self.sf_editing = Self::session_index_after_removal(self.sf_editing, index);
+    }
+
     fn save_session_form(&mut self) {
+        self.apply_session_form();
+        let _ = sessions::save(&self.sessions);
+    }
+
+    fn apply_session_form(&mut self) {
         // Preserve a previously-saved SSH username when editing.
         let ssh_user = self
             .sf_editing
@@ -1040,7 +1083,6 @@ impl VncApp {
             self.session_selected = Some(last);
             self.sf_editing = Some(last);
         }
-        let _ = sessions::save(&self.sessions);
     }
 
     // ── Start screen ──────────────────────────────────────────────────────────

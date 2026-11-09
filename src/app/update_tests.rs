@@ -224,3 +224,257 @@ fn diagnostic_app_does_not_remember_fixture_sessions() {
     app.remember_session();
     assert!(app.sessions.is_empty());
 }
+
+fn session_editor(count: usize, editing: usize) -> VncApp {
+    let saved = (0..count)
+        .map(|i| Session {
+            id: format!("fixture-id-{i}"),
+            name: format!("Session {i}"),
+            host: format!("desktop-{i}.invalid"),
+            port: 5900 + i as u16,
+            username: Some(format!("vnc-user-{i}")),
+            password: format!("dummy-password-{i}"),
+            ssh_user: format!("ssh-user-{i}"),
+        })
+        .collect();
+    let mut app = VncApp::with_sessions(None, saved);
+    app.persist_sessions = false;
+    let s = &app.sessions[editing];
+    app.sf_name = s.name.clone();
+    app.sf_host = s.host.clone();
+    app.sf_port = s.port.to_string();
+    app.sf_username = s.username.clone().unwrap();
+    app.sf_password = s.password.clone();
+    app.session_selected = Some(editing);
+    app.sf_editing = Some(editing);
+    app
+}
+
+#[test]
+fn removing_an_earlier_session_keeps_edits_on_the_same_account() {
+    let mut app = session_editor(3, 1);
+    let mut edited = app.sessions[1].clone();
+    let other = app.sessions[2].clone();
+    app.sf_name = "Updated session".into();
+    app.sf_password = "updated dummy password".into();
+    edited.name = app.sf_name.clone();
+    edited.password = app.sf_password.clone();
+    app.remove_session(0);
+    app.apply_session_form();
+    assert_eq!(app.sessions, [edited, other]);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+}
+
+#[test]
+fn removing_an_earlier_session_keeps_the_last_session_editable() {
+    let mut app = session_editor(2, 1);
+    let mut expected = app.sessions[1].clone();
+    app.sf_name = "Still editable".into();
+    expected.name = app.sf_name.clone();
+    app.remove_session(0);
+    app.apply_session_form();
+    assert_eq!(app.sessions, [expected]);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+}
+
+#[test]
+fn removing_a_later_session_keeps_the_current_editor() {
+    let mut app = session_editor(3, 0);
+    let other = app.sessions[1].clone();
+    let mut edited = app.sessions[0].clone();
+    app.sf_name = "Updated first".into();
+    edited.name = app.sf_name.clone();
+    app.remove_session(2);
+    app.apply_session_form();
+    assert_eq!(app.sessions, [edited, other]);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+}
+
+#[test]
+fn removing_the_edited_session_does_not_overwrite_its_neighbor() {
+    let mut app = session_editor(3, 1);
+    let first = app.sessions[0].clone();
+    let last = app.sessions[2].clone();
+    let removed_id = app.sessions[1].id.clone();
+    app.remove_session(1);
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+    // Existing behavior retains the form as a new, independently identified
+    // session. Saving it must not replace either surviving account.
+    app.apply_session_form();
+    assert_eq!(app.sessions.len(), 3);
+    assert_eq!(app.sessions[0], first);
+    assert_eq!(app.sessions[1], last);
+    assert_ne!(app.sessions[2].id, removed_id);
+    assert!(app.sessions[2].ssh_user.is_empty());
+}
+
+#[test]
+fn removing_sessions_adjusts_selection_and_editor_independently() {
+    for selected in 0..3 {
+        for editing in 0..3 {
+            for removed in 0..3 {
+                let mut app = session_editor(3, editing);
+                app.session_selected = Some(selected);
+                let selected_id = app.sessions[selected].id.clone();
+                let editing_id = app.sessions[editing].id.clone();
+                app.remove_session(removed);
+                let locate = |id: &str| app.sessions.iter().position(|s| s.id == id);
+                assert_eq!(app.session_selected, locate(&selected_id));
+                assert_eq!(app.sf_editing, locate(&editing_id));
+            }
+        }
+    }
+}
+
+#[test]
+fn repeated_removals_preserve_the_new_session_form() {
+    let mut app = session_editor(3, 2);
+    app.session_selected = None;
+    app.sf_editing = None;
+    app.sf_name = "New draft".into();
+    for index in [1, 0, 0] {
+        app.remove_session(index);
+        assert_eq!(app.session_selected, None);
+        assert_eq!(app.sf_editing, None);
+        assert_eq!(app.sf_name, "New draft");
+    }
+    app.apply_session_form();
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].name, "New draft");
+}
+
+#[test]
+fn pending_session_connections_follow_the_remaining_account() {
+    assert_eq!(VncApp::session_index_after_removal(None, 1), None);
+    assert_eq!(VncApp::session_index_after_removal(Some(0), 1), Some(0));
+    assert_eq!(VncApp::session_index_after_removal(Some(1), 1), None);
+    assert_eq!(VncApp::session_index_after_removal(Some(2), 1), Some(1));
+    assert_eq!(VncApp::session_index_after_removal(Some(0), 0), None);
+    assert_eq!(VncApp::session_index_after_removal(Some(1), 0), Some(0));
+}
+
+#[test]
+fn reloading_sessions_keeps_edits_on_the_same_account_after_reordering() {
+    let mut app = session_editor(3, 1);
+    let first = app.sessions[0].clone();
+    let last = app.sessions[2].clone();
+    let mut edited = app.sessions[1].clone();
+    app.sf_name = "Unsaved label".into();
+    app.sf_password = "unsaved dummy password".into();
+    edited.name = app.sf_name.clone();
+    edited.password = app.sf_password.clone();
+    app.replace_sessions(vec![app.sessions[1].clone(), first.clone(), last.clone()]);
+    app.apply_session_form();
+    assert_eq!(app.sessions, [edited, first, last]);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+}
+
+#[test]
+fn reloading_after_external_deletion_keeps_the_last_session_editable() {
+    let mut app = session_editor(2, 1);
+    let mut expected = app.sessions[1].clone();
+    app.sf_name = "Still editable after reload".into();
+    expected.name = app.sf_name.clone();
+    app.replace_sessions(vec![app.sessions[1].clone()]);
+    app.apply_session_form();
+    assert_eq!(app.sessions, [expected]);
+}
+
+#[test]
+fn reloading_without_the_edited_session_preserves_a_new_draft() {
+    let mut app = session_editor(3, 1);
+    let remaining = vec![app.sessions[0].clone(), app.sessions[2].clone()];
+    let removed_id = app.sessions[1].id.clone();
+    app.replace_sessions(remaining.clone());
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+    app.apply_session_form();
+    assert_eq!(&app.sessions[..2], remaining);
+    assert_ne!(app.sessions[2].id, removed_id);
+    assert_eq!(app.sessions[2].name, "Session 1");
+    assert!(app.sessions[2].ssh_user.is_empty());
+}
+
+#[test]
+fn reloading_sessions_remaps_selection_and_editor_independently() {
+    for selected in 0..3 {
+        for editing in 0..3 {
+            let mut app = session_editor(3, editing);
+            app.session_selected = Some(selected);
+            let selected_id = app.sessions[selected].id.clone();
+            let editing_id = app.sessions[editing].id.clone();
+            let mut reloaded = app.sessions.clone();
+            reloaded.rotate_left(1);
+            app.replace_sessions(reloaded);
+            let locate = |id: &str| app.sessions.iter().position(|s| s.id == id);
+            assert_eq!(app.session_selected, locate(&selected_id));
+            assert_eq!(app.sf_editing, locate(&editing_id));
+        }
+    }
+}
+
+#[test]
+fn reloading_sessions_uses_unique_ids_and_preserves_unsaved_form_values() {
+    let mut app = session_editor(3, 1);
+    let mut reloaded = app.sessions.clone();
+    reloaded.rotate_left(1);
+    reloaded[0].name = "Externally renamed".into();
+    reloaded[0].ssh_user = "updated ssh user".into();
+    app.sf_name = "Unsaved label".into();
+    app.replace_sessions(reloaded);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+    assert_eq!(app.sf_name, "Unsaved label");
+    app.apply_session_form();
+    assert_eq!(app.sessions[0].ssh_user, "updated ssh user");
+}
+
+#[test]
+fn reloading_legacy_sessions_requires_one_exact_match() {
+    let mut app = session_editor(3, 1);
+    for session in &mut app.sessions {
+        session.id.clear();
+    }
+    let mut reloaded = app.sessions.clone();
+    reloaded.rotate_left(1);
+    app.replace_sessions(reloaded);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+    let mut changed = app.sessions.clone();
+    changed[0].username = Some("different account".into());
+    app.replace_sessions(changed);
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+}
+
+#[test]
+fn reloading_ambiguous_or_missing_sessions_does_not_select_a_neighbor() {
+    for legacy in [false, true] {
+        let mut app = session_editor(3, 1);
+        if legacy {
+            app.sessions[1].id.clear();
+        }
+        let mut ambiguous = app.sessions.clone();
+        ambiguous.push(app.sessions[1].clone());
+        app.replace_sessions(ambiguous);
+        assert_eq!(app.session_selected, None);
+        assert_eq!(app.sf_editing, None);
+    }
+    let mut app = session_editor(3, 1);
+    app.session_selected = Some(100);
+    app.sf_editing = None;
+    app.sf_name = "New draft".into();
+    app.replace_sessions(app.sessions.clone());
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+    assert_eq!(app.sf_name, "New draft");
+    app.replace_sessions(Vec::new());
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+    assert_eq!(app.sf_name, "New draft");
+}
