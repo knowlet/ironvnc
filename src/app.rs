@@ -877,25 +877,34 @@ impl VncApp {
     }
 
     fn replace_sessions(&mut self, sessions: Vec<Session>) {
-        let remap = |index: Option<usize>| {
-            let previous = self.sessions.get(index?)?;
-            let mut matches = sessions.iter().enumerate().filter(|(_, session)| {
-                if previous.id.is_empty() {
-                    // Legacy records have no persistent ID. Only an exact,
-                    // unambiguous record can safely retain an editor target.
-                    *session == previous
-                } else {
-                    session.id == previous.id
-                }
-            });
-            let (index, _) = matches.next()?;
-            matches.next().is_none().then_some(index)
-        };
-        let selected = remap(self.session_selected);
-        let editing = remap(self.sf_editing);
+        let selected = Self::remap_session_index(&self.sessions, self.session_selected, &sessions);
+        let editing = Self::remap_session_index(&self.sessions, self.sf_editing, &sessions);
         self.sessions = sessions;
         self.session_selected = selected;
         self.sf_editing = editing;
+    }
+
+    /// Map a saved-session index onto `loaded`.
+    /// A unique non-empty ID follows that account across reloads. A shared ID
+    /// is not an identity: only one exact record may keep the editor, so a
+    /// sibling with the same ID cannot receive this session's form.
+    fn remap_session_index(
+        current: &[Session],
+        index: Option<usize>,
+        loaded: &[Session],
+    ) -> Option<usize> {
+        let previous = current.get(index?)?;
+        let shared = sessions::id_is_duplicated(current, &previous.id)
+            || sessions::id_is_duplicated(loaded, &previous.id);
+        if !previous.id.is_empty() && !shared {
+            return loaded.iter().position(|session| session.id == previous.id);
+        }
+        let mut matches = loaded
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| *session == previous);
+        let (found, _) = matches.next()?;
+        matches.next().is_none().then_some(found)
     }
 
     // ── Sessions popup window ─────────────────────────────────────────────────
@@ -1041,8 +1050,13 @@ impl VncApp {
     }
 
     fn remove_session(&mut self, index: usize) {
-        self.sessions.remove(index);
-        // Keep every remaining index attached to the same saved account.
+        let Some(expected) = self.sessions.get(index).cloned() else {
+            return;
+        };
+        // Drop this row only. A sibling that shares its ID is a different session.
+        if !sessions::remove_indexed_instance(&mut self.sessions, index, &expected) {
+            return;
+        }
         self.session_selected = Self::session_index_after_removal(self.session_selected, index);
         self.sf_editing = Self::session_index_after_removal(self.sf_editing, index);
     }
@@ -1059,13 +1073,13 @@ impl VncApp {
             .and_then(|i| self.sessions.get(i))
             .map(|s| s.ssh_user.clone())
             .unwrap_or_default();
+        let existing_id = self
+            .sf_editing
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
         let session = Session {
-            id: self
-                .sf_editing
-                .and_then(|i| self.sessions.get(i))
-                .map(|s| s.id.clone())
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(sessions::new_id),
+            id: existing_id.clone(),
             name: self.sf_name.trim().to_string(),
             host: self.sf_host.trim().to_string(),
             port: self.sf_port.parse().unwrap_or(5900),
@@ -1074,15 +1088,15 @@ impl VncApp {
             ssh_user,
         };
         if let Some(i) = self.sf_editing {
-            if i < self.sessions.len() {
-                self.sessions[i] = session;
-            }
-        } else {
-            self.sessions.push(session);
-            let last = self.sessions.len() - 1;
-            self.session_selected = Some(last);
-            self.sf_editing = Some(last);
+            // Out-of-range editors still drop the write. A slot that no longer
+            // holds this ID is a different session and must not be replaced.
+            let _ =
+                sessions::replace_session_instance(&mut self.sessions, i, &existing_id, session);
+            return;
         }
+        let index = sessions::insert_session(&mut self.sessions, session);
+        self.session_selected = Some(index);
+        self.sf_editing = Some(index);
     }
 
     // ── Start screen ──────────────────────────────────────────────────────────

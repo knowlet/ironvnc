@@ -478,3 +478,87 @@ fn reloading_ambiguous_or_missing_sessions_does_not_select_a_neighbor() {
     assert_eq!(app.sf_editing, None);
     assert_eq!(app.sf_name, "New draft");
 }
+
+fn share_id(app: &mut VncApp) {
+    for session in &mut app.sessions {
+        session.id = "shared-id".into();
+    }
+}
+
+#[test]
+fn saving_a_duplicate_id_does_not_overwrite_the_other_session() {
+    let mut app = session_editor(2, 1);
+    share_id(&mut app);
+    let first = app.sessions[0].clone();
+    let second_host = app.sessions[1].host.clone();
+    app.sf_name = "Edited second".into();
+    app.sf_password = "edited-secret".into();
+    app.apply_session_form();
+    assert_eq!(app.sessions.len(), 2);
+    assert_eq!(app.sessions[0], first);
+    assert_eq!(app.sessions[1].name, "Edited second");
+    assert_eq!(app.sessions[1].password, "edited-secret");
+    assert_eq!(app.sessions[1].host, second_host);
+    assert_ne!(app.sessions[1].id, first.id);
+    assert!(!app.sessions[1].id.is_empty());
+}
+
+#[test]
+fn reloading_a_shared_id_does_not_overwrite_the_surviving_session() {
+    let mut app = session_editor(2, 1);
+    share_id(&mut app);
+    let survivor = app.sessions[0].clone();
+    let removed = app.sessions[1].clone();
+    app.sf_name = "Edited duplicate".into();
+    app.sf_password = "edited-secret".into();
+    app.replace_sessions(vec![survivor.clone()]);
+    assert_eq!(app.session_selected, None);
+    assert_eq!(app.sf_editing, None);
+    app.apply_session_form();
+    assert_eq!(app.sessions[0], survivor);
+    assert_ne!(app.sessions[0].name, "Edited duplicate");
+    assert_ne!(app.sessions[0].password, "edited-secret");
+    assert_eq!(app.sessions.len(), 2);
+    assert_eq!(app.sessions[1].name, "Edited duplicate");
+    assert_eq!(app.sessions[1].password, "edited-secret");
+    assert_ne!(app.sessions[1].id, survivor.id);
+    assert_ne!(app.sessions[1].id, removed.id);
+}
+
+#[test]
+fn reloading_duplicate_ids_keeps_the_editor_on_the_matching_instance() {
+    let mut app = session_editor(2, 1);
+    share_id(&mut app);
+    let first = app.sessions[0].clone();
+    let second = app.sessions[1].clone();
+    app.sf_name = "Edited second".into();
+    app.replace_sessions(vec![first.clone(), second.clone()]);
+    assert_eq!(app.session_selected, Some(1));
+    assert_eq!(app.sf_editing, Some(1));
+    app.apply_session_form();
+    assert_eq!(app.sessions.len(), 2);
+    assert_eq!(app.sessions[0], first);
+    assert_eq!(app.sessions[1].name, "Edited second");
+    assert_eq!(app.sessions[1].host, second.host);
+    assert_eq!(app.sessions[1].password, second.password);
+    assert_ne!(app.sessions[0].id, app.sessions[1].id);
+}
+
+#[test]
+fn removing_one_shared_id_keeps_the_other_instance() {
+    let mut app = session_editor(2, 1);
+    share_id(&mut app);
+    let survivor = app.sessions[1].clone();
+    app.remove_session(0);
+    assert_eq!(app.sessions, vec![survivor.clone()]);
+    assert_eq!(app.session_selected, Some(0));
+    assert_eq!(app.sf_editing, Some(0));
+    app.sf_name = "Still the survivor".into();
+    app.apply_session_form();
+    assert_eq!(app.sessions.len(), 1);
+    assert_eq!(app.sessions[0].name, "Still the survivor");
+    assert_eq!(app.sessions[0].host, survivor.host);
+    assert_eq!(app.sessions[0].password, survivor.password);
+    assert_eq!(app.sessions[0].ssh_user, survivor.ssh_user);
+    assert_eq!(app.sessions[0].id, survivor.id);
+}
