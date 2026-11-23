@@ -93,6 +93,10 @@ struct Args {
     /// The parent row had no unique ID. Do not store a password after auth.
     #[arg(long, hide = true, default_value_t = false)]
     no_session_writeback: bool,
+
+    /// The parent row had an empty legacy ID. The loaded row must still have none.
+    #[arg(long, hide = true, default_value_t = false)]
+    expect_empty_id: bool,
 }
 
 fn launch_account(args: &Args) -> Result<sessions::LaunchAccount> {
@@ -121,6 +125,7 @@ fn saved_launch(args: &Args) -> Result<Option<sessions::SavedLaunch>> {
             expected_name: args.session_name.clone(),
             account,
             no_writeback: args.no_session_writeback,
+            expect_empty_id: args.expect_empty_id,
         }));
     }
     Ok(None)
@@ -461,6 +466,7 @@ mod cli_tests {
         assert!(!help.contains("--session-id"));
         assert!(!help.contains("--session-name"));
         assert!(!help.contains("--no-session-writeback"));
+        assert!(!help.contains("--expect-empty-id"));
     }
 
     #[test]
@@ -520,5 +526,28 @@ mod cli_tests {
             Some(&identity),
         ));
         assert_eq!(loaded, before);
+    }
+
+    #[test]
+    fn empty_id_launch_args_reject_a_recreated_row() {
+        let legacy = sessions::Session {
+            id: String::new(),
+            name: "A".into(),
+            host: "desktop.example".into(),
+            port: 5900,
+            username: Some("alice".into()),
+            password: "old secret".into(),
+            ssh_user: String::new(),
+        };
+        let argv = sessions::session_window_args(std::slice::from_ref(&legacy), &legacy).unwrap();
+        let mut cli = vec!["ironvnc".to_string()];
+        cli.extend(argv);
+        let args = Args::try_parse_from(&cli).unwrap();
+        assert!(args.expect_empty_id);
+        let launch = saved_launch(&args).unwrap().unwrap();
+        let mut loaded = Vec::new();
+        sessions::insert_session(&mut loaded, legacy);
+        assert!(sessions::open_saved_launch(&loaded, &launch).is_err());
+        assert_eq!(loaded[0].password, "old secret");
     }
 }

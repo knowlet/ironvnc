@@ -22,10 +22,9 @@ impl Session {
     /// Identity of this row for an in-flight connection.
     ///
     /// A non-empty ID is that identity only when it appears once in `sessions`.
-    /// A shared ID is not a row. Credential writeback is skipped for it: saving
-    /// one copy assigns a new ID, and a recreated row with the same name and
-    /// account would otherwise take the password. Legacy empty IDs still bind
-    /// by name and account.
+    /// A shared ID is not a row. Credential writeback is skipped for it.
+    /// A legacy empty ID binds by name and account only while the row's ID is
+    /// still empty, so a recreated row with a new ID cannot take the password.
     pub fn identity(&self, sessions: &[Session]) -> SessionIdentity {
         let shared_id = id_is_duplicated(sessions, &self.id);
         SessionIdentity {
@@ -108,7 +107,10 @@ impl SessionIdentity {
                 && self.username == session.username
                 && self.password == session.password
         } else {
-            self.name == session.name
+            // The source row had no ID. A replacement with the same name and
+            // account but a new ID is a different row.
+            session.id.is_empty()
+                && self.name == session.name
                 && self.host == session.host
                 && self.port == session.port
                 && self.username == session.username
@@ -184,6 +186,8 @@ pub struct SavedLaunch {
     pub expected_name: Option<String>,
     pub account: Option<LaunchAccount>,
     pub no_writeback: bool,
+    /// The parent row's ID was empty. The loaded row must still have none.
+    pub expect_empty_id: bool,
 }
 
 pub fn open_saved_launch<'a>(
@@ -209,6 +213,9 @@ pub fn open_saved_launch<'a>(
         } else {
             anyhow::bail!("No saved session was selected");
         };
+    if launch.expect_empty_id && !session.id.is_empty() {
+        anyhow::bail!("Saved session no longer has an empty ID");
+    }
     let identity = session.identity(sessions);
     let identity = if launch.no_writeback {
         identity.forbid_credential_writeback()
@@ -258,6 +265,11 @@ pub fn session_window_args(sessions: &[Session], session: &Session) -> Option<Ve
     // restriction even if the row is recreated with a fresh ID before it loads.
     if id_is_duplicated(sessions, &session.id) {
         args.push("--no-session-writeback".to_string());
+    }
+    // An empty legacy ID must still be empty when the child loads and when
+    // it later stores a password. A recreated row has a new ID.
+    if session.id.is_empty() {
+        args.push("--expect-empty-id".to_string());
     }
     Some(args)
 }
@@ -974,6 +986,63 @@ mod tests {
         assert_eq!(child[0].name, "Other");
     }
 
+    #[test]
+    fn empty_id_launch_rejects_a_row_recreated_before_the_child_loads() {
+        let legacy = account("A", "alice", "old secret");
+        let argv = session_window_args(std::slice::from_ref(&legacy), &legacy).unwrap();
+        assert!(argv.iter().any(|arg| arg == "--expect-empty-id"));
+        let launch = saved_launch_from_argv(&argv);
+        assert!(launch.expect_empty_id);
+        let mut loaded = Vec::new();
+        insert_session(&mut loaded, legacy);
+        assert!(!loaded[0].id.is_empty());
+        assert!(open_saved_launch(&loaded, &launch).is_err());
+        assert_eq!(loaded[0].password, "old secret");
+    }
+
+    #[test]
+    fn empty_id_writeback_skips_a_row_recreated_after_the_child_loads() {
+        let legacy = account("A", "alice", "old secret");
+        let parent = vec![legacy.clone()];
+        let launch = saved_launch_from_argv(
+            &session_window_args(&parent, &legacy).expect("legacy row launches"),
+        );
+        let (opened, identity) = open_saved_launch(&parent, &launch).unwrap();
+        assert!(opened.id.is_empty());
+        let mut loaded = Vec::new();
+        insert_session(&mut loaded, legacy);
+        let before = loaded.clone();
+        assert!(!remember_connection(
+            &mut loaded,
+            "desktop.example",
+            5900,
+            Some("alice".into()),
+            "typed password",
+            Some(&identity),
+        ));
+        assert_eq!(loaded, before);
+    }
+
+    #[test]
+    fn empty_id_launch_still_updates_the_same_row() {
+        let legacy = account("A", "alice", "old secret");
+        let mut sessions = vec![legacy.clone()];
+        let launch = saved_launch_from_argv(
+            &session_window_args(&sessions, &legacy).expect("legacy row launches"),
+        );
+        let (_opened, identity) = open_saved_launch(&sessions, &launch).unwrap();
+        assert!(remember_connection(
+            &mut sessions,
+            "desktop.example",
+            5900,
+            Some("alice".into()),
+            "typed password",
+            Some(&identity),
+        ));
+        assert_eq!(sessions[0].password, "typed password");
+        assert!(!sessions[0].id.is_empty());
+    }
+
     fn saved_launch_from_argv(argv: &[String]) -> SavedLaunch {
         let mut launch = SavedLaunch {
             id: None,
@@ -981,6 +1050,7 @@ mod tests {
             expected_name: None,
             account: None,
             no_writeback: false,
+            expect_empty_id: false,
         };
         let mut host = None;
         let mut port = None;
@@ -998,6 +1068,11 @@ mod tests {
                 "--session-username" => username = value.map(str::to_string),
                 "--no-session-writeback" => {
                     launch.no_writeback = true;
+                    index += 1;
+                    continue;
+                }
+                "--expect-empty-id" => {
+                    launch.expect_empty_id = true;
                     index += 1;
                     continue;
                 }
