@@ -82,6 +82,16 @@ impl std::fmt::Debug for SessionIdentity {
 }
 
 impl SessionIdentity {
+    /// The parent already decided this connection must not store a password.
+    /// A row deleted and recreated before the child loads can look unique.
+    fn forbid_credential_writeback(mut self) -> Self {
+        self.shared_id = true;
+        self.id.clear();
+        self
+    }
+}
+
+impl SessionIdentity {
     fn matches(&self, session: &Session) -> bool {
         // A shared ID identifies no row. Matching the name and account would
         // write this connection's password into a recreated identical row.
@@ -140,11 +150,14 @@ pub fn find_launched_session<'a>(
 }
 
 /// Resolve `--session` and, when the parent supplied an account, require it.
-/// An ambiguous name or host is an error.
+/// `expected_name` is the saved name of the row the parent selected. Without
+/// it, a deleted name falls through to a different row that uses that string
+/// as its host.
 pub fn find_named_account<'a>(
     sessions: &'a [Session],
     key: &str,
     account: Option<&LaunchAccount>,
+    expected_name: Option<&str>,
 ) -> Result<&'a Session> {
     let session = find_named(sessions, key)?;
     if let Some(account) = account {
@@ -153,7 +166,56 @@ pub fn find_named_account<'a>(
             "Saved session does not match the requested account"
         );
     }
+    if let Some(expected_name) = expected_name {
+        anyhow::ensure!(
+            session.name == expected_name,
+            "Saved session name does not match the selected row"
+        );
+    }
     Ok(session)
+}
+
+/// What the parent told the child to open. `no_writeback` survives auth:
+/// the child must not recompute it from the file it loaded.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SavedLaunch {
+    pub id: Option<String>,
+    pub key: Option<String>,
+    pub expected_name: Option<String>,
+    pub account: Option<LaunchAccount>,
+    pub no_writeback: bool,
+}
+
+pub fn open_saved_launch<'a>(
+    sessions: &'a [Session],
+    launch: &SavedLaunch,
+) -> Result<(&'a Session, SessionIdentity)> {
+    let session =
+        if let Some(id) = launch.id.as_deref() {
+            let name = launch.expected_name.as_deref().ok_or_else(|| {
+                anyhow::anyhow!("--session-id requires the selected session name")
+            })?;
+            let account = launch.account.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("--session-id requires the selected session account")
+            })?;
+            find_launched_session(sessions, id, name, account)?
+        } else if let Some(key) = launch.key.as_deref() {
+            find_named_account(
+                sessions,
+                key,
+                launch.account.as_ref(),
+                launch.expected_name.as_deref(),
+            )?
+        } else {
+            anyhow::bail!("No saved session was selected");
+        };
+    let identity = session.identity(sessions);
+    let identity = if launch.no_writeback {
+        identity.forbid_credential_writeback()
+    } else {
+        identity
+    };
+    Ok((session, identity))
 }
 
 /// Child-process arguments that open `session`.
@@ -188,6 +250,15 @@ pub fn session_window_args(sessions: &[Session], session: &Session) -> Option<Ve
     }
     let mut args = vec!["--session".to_string(), key.to_string()];
     args.extend(account_args);
+    // The lookup key may be the host. The child must still require this name,
+    // or a deleted row falls through to a sibling on that host.
+    args.push("--session-name".to_string());
+    args.push(session.name.clone());
+    // A shared ID is not unique in this window. The child must keep that
+    // restriction even if the row is recreated with a fresh ID before it loads.
+    if id_is_duplicated(sessions, &session.id) {
+        args.push("--no-session-writeback".to_string());
+    }
     Some(args)
 }
 
@@ -849,14 +920,103 @@ mod tests {
                 .name,
             "A"
         );
-        let named = find_named_account(&saved, "A", Some(&account)).unwrap();
+        let named = find_named_account(&saved, "A", Some(&account), Some("A")).unwrap();
         assert_eq!(named.id, "new-id");
         let other_account = LaunchAccount {
             host: "other.example".into(),
             port: 5901,
             username: Some("other".into()),
         };
-        assert!(find_named_account(&saved, "A", Some(&other_account)).is_err());
+        assert!(find_named_account(&saved, "A", Some(&other_account), Some("A")).is_err());
+    }
+
+    #[test]
+    fn name_launch_keeps_writeback_off_when_the_row_is_recreated() {
+        let first = shared_account("A");
+        let second = shared_account("B");
+        let argv = session_window_args(&[first.clone(), second], &first).unwrap();
+        assert!(argv.iter().any(|arg| arg == "--no-session-writeback"));
+        assert!(argv.windows(2).any(|pair| pair == ["--session-name", "A"]));
+        let launch = saved_launch_from_argv(&argv);
+        assert!(launch.no_writeback);
+        let mut recreated = first;
+        recreated.id.clear();
+        let mut loaded = Vec::new();
+        insert_session(&mut loaded, recreated);
+        assert!(!id_is_duplicated(&loaded, &loaded[0].id));
+        let (_opened, identity) = open_saved_launch(&loaded, &launch).unwrap();
+        let before = loaded.clone();
+        assert!(!remember_connection(
+            &mut loaded,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "typed password",
+            Some(&identity),
+        ));
+        assert_eq!(loaded, before);
+    }
+
+    #[test]
+    fn deleted_name_does_not_open_a_host_fallback_sibling() {
+        let mut selected = account("A", "alice", "selected secret");
+        selected.host = "A".into();
+        selected.id = "shared".into();
+        let mut sibling = account("Other", "alice", "sibling secret");
+        sibling.host = "A".into();
+        sibling.id = "shared".into();
+        let argv = session_window_args(&[selected.clone(), sibling.clone()], &selected).unwrap();
+        assert!(argv.windows(2).any(|pair| pair == ["--session-name", "A"]));
+        let launch = saved_launch_from_argv(&argv);
+        let child = vec![sibling];
+        assert!(open_saved_launch(&child, &launch).is_err());
+        assert_eq!(child[0].password, "sibling secret");
+        assert_eq!(child[0].name, "Other");
+    }
+
+    fn saved_launch_from_argv(argv: &[String]) -> SavedLaunch {
+        let mut launch = SavedLaunch {
+            id: None,
+            key: None,
+            expected_name: None,
+            account: None,
+            no_writeback: false,
+        };
+        let mut host = None;
+        let mut port = None;
+        let mut username = None;
+        let mut index = 0;
+        while index < argv.len() {
+            let arg = argv[index].as_str();
+            let value = argv.get(index + 1).map(String::as_str);
+            match arg {
+                "--session-id" => launch.id = value.map(str::to_string),
+                "--session" => launch.key = value.map(str::to_string),
+                "--session-name" => launch.expected_name = value.map(str::to_string),
+                "--session-host" => host = value.map(str::to_string),
+                "--session-port" => port = value.and_then(|text| text.parse().ok()),
+                "--session-username" => username = value.map(str::to_string),
+                "--no-session-writeback" => {
+                    launch.no_writeback = true;
+                    index += 1;
+                    continue;
+                }
+                _ => {}
+            }
+            index += if value.is_some() && arg.starts_with("--session") {
+                2
+            } else {
+                1
+            };
+        }
+        if let (Some(host), Some(port)) = (host, port) {
+            launch.account = Some(LaunchAccount {
+                host,
+                port,
+                username,
+            });
+        }
+        launch
     }
 
     fn insert_locked(sessions: &std::sync::Mutex<Vec<Session>>, session: Session) -> usize {
