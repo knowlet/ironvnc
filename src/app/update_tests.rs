@@ -453,6 +453,27 @@ fn reloading_legacy_sessions_requires_one_exact_match() {
 }
 
 #[test]
+fn deleting_one_of_two_identical_rows_elsewhere_does_not_attach_to_the_sibling() {
+    for legacy in [false, true] {
+        let mut app = session_editor(2, 0);
+        if legacy {
+            app.sessions[0].id.clear();
+        }
+        let twin = app.sessions[0].clone();
+        app.sessions[1] = twin.clone();
+        app.session_selected = Some(0);
+        app.sf_editing = Some(0);
+        app.sf_name = "Unsaved edit of the deleted row".into();
+        // Another window deleted row 0; only its identical sibling remains.
+        app.replace_sessions(vec![twin.clone()]);
+        assert_eq!(app.session_selected, None, "legacy={legacy}");
+        assert_eq!(app.sf_editing, None, "legacy={legacy}");
+        app.apply_session_form();
+        assert_eq!(app.sessions[0], twin, "legacy={legacy}");
+    }
+}
+
+#[test]
 fn reloading_ambiguous_or_missing_sessions_does_not_select_a_neighbor() {
     for legacy in [false, true] {
         let mut app = session_editor(3, 1);

@@ -899,6 +899,16 @@ impl VncApp {
         if !previous.id.is_empty() && !shared {
             return loaded.iter().position(|session| session.id == previous.id);
         }
+        // Identical rows cannot be told apart: if this window had two, a
+        // single survivor in `loaded` may be the sibling, not this row.
+        if current
+            .iter()
+            .filter(|session| *session == previous)
+            .count()
+            != 1
+        {
+            return None;
+        }
         let mut matches = loaded
             .iter()
             .enumerate()
