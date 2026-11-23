@@ -204,18 +204,14 @@ impl VncApp {
 
     /// Open a saved session in its own window. Passing the session key (not the
     /// password) keeps credentials off the command line — the child loads the
-    /// password from the saved sessions file.
-    fn open_session_window(session: &Session) {
-        if !session.id.is_empty() {
-            Self::spawn_window(&["--session-id", &session.id]);
+    /// password from the saved sessions file. A shared ID is not sent, and an
+    /// ambiguous name or account does not launch.
+    fn open_session_window(sessions: &[Session], session: &Session) {
+        let Some(args) = sessions::session_window_args(sessions, session) else {
             return;
-        }
-        let key = if session.name.is_empty() {
-            &session.host
-        } else {
-            &session.name
         };
-        Self::spawn_window(&["--session", key]);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        Self::spawn_window(&borrowed);
     }
 
     /// Open an ad-hoc host:port connection in its own window. The child loads a
@@ -863,7 +859,7 @@ impl VncApp {
             return;
         }
         // Other session windows may have saved since this window was opened.
-        self.sessions = sessions::load();
+        self.replace_sessions(sessions::load());
         if sessions::remember_connection(
             &mut self.sessions,
             &self.current_host,
@@ -874,6 +870,47 @@ impl VncApp {
         ) {
             let _ = sessions::save(&self.sessions);
         }
+    }
+
+    fn replace_sessions(&mut self, sessions: Vec<Session>) {
+        let selected = Self::remap_session_index(&self.sessions, self.session_selected, &sessions);
+        let editing = Self::remap_session_index(&self.sessions, self.sf_editing, &sessions);
+        self.sessions = sessions;
+        self.session_selected = selected;
+        self.sf_editing = editing;
+    }
+
+    /// Map a saved-session index onto `loaded`.
+    /// A unique non-empty ID follows that account across reloads. A shared ID
+    /// is not an identity: only one exact record may keep the editor, so a
+    /// sibling with the same ID cannot receive this session's form.
+    fn remap_session_index(
+        current: &[Session],
+        index: Option<usize>,
+        loaded: &[Session],
+    ) -> Option<usize> {
+        let previous = current.get(index?)?;
+        let shared = sessions::id_is_duplicated(current, &previous.id)
+            || sessions::id_is_duplicated(loaded, &previous.id);
+        if !previous.id.is_empty() && !shared {
+            return loaded.iter().position(|session| session.id == previous.id);
+        }
+        // Identical rows cannot be told apart: if this window had two, a
+        // single survivor in `loaded` may be the sibling, not this row.
+        if current
+            .iter()
+            .filter(|session| *session == previous)
+            .count()
+            != 1
+        {
+            return None;
+        }
+        let mut matches = loaded
+            .iter()
+            .enumerate()
+            .filter(|(_, session)| *session == previous);
+        let (found, _) = matches.next()?;
+        matches.next().is_none().then_some(found)
     }
 
     // ── Sessions popup window ─────────────────────────────────────────────────
@@ -994,35 +1031,61 @@ impl VncApp {
             }
         }
         if let Some(i) = delete_idx {
-            self.sessions.remove(i);
-            if self.session_selected == Some(i) {
-                self.session_selected = None;
-                self.sf_editing = None;
-            }
+            self.remove_session(i);
+            connect_idx = Self::session_index_after_removal(connect_idx, i);
             let _ = sessions::save(&self.sessions);
         }
         if let Some(i) = connect_idx {
             if let Some(s) = self.sessions.get(i).cloned() {
                 // Open each saved session in its own window.
-                Self::open_session_window(&s);
+                Self::open_session_window(&self.sessions, &s);
             }
         }
     }
 
+    fn session_index_after_removal(index: Option<usize>, removed: usize) -> Option<usize> {
+        index.and_then(|i| {
+            if i == removed {
+                None
+            } else if i > removed {
+                Some(i - 1)
+            } else {
+                Some(i)
+            }
+        })
+    }
+
+    fn remove_session(&mut self, index: usize) {
+        let Some(expected) = self.sessions.get(index).cloned() else {
+            return;
+        };
+        // Drop this row only. A sibling that shares its ID is a different session.
+        if !sessions::remove_indexed_instance(&mut self.sessions, index, &expected) {
+            return;
+        }
+        self.session_selected = Self::session_index_after_removal(self.session_selected, index);
+        self.sf_editing = Self::session_index_after_removal(self.sf_editing, index);
+    }
+
     fn save_session_form(&mut self) {
+        self.apply_session_form();
+        let _ = sessions::save(&self.sessions);
+    }
+
+    fn apply_session_form(&mut self) {
         // Preserve a previously-saved SSH username when editing.
         let ssh_user = self
             .sf_editing
             .and_then(|i| self.sessions.get(i))
             .map(|s| s.ssh_user.clone())
             .unwrap_or_default();
+        let existing_id = self
+            .sf_editing
+            .and_then(|i| self.sessions.get(i))
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
         let session = Session {
-            id: self
-                .sf_editing
-                .and_then(|i| self.sessions.get(i))
-                .map(|s| s.id.clone())
-                .filter(|id| !id.is_empty())
-                .unwrap_or_else(sessions::new_id),
+            id: existing_id.clone(),
             name: self.sf_name.trim().to_string(),
             host: self.sf_host.trim().to_string(),
             port: self.sf_port.parse().unwrap_or(5900),
@@ -1031,16 +1094,15 @@ impl VncApp {
             ssh_user,
         };
         if let Some(i) = self.sf_editing {
-            if i < self.sessions.len() {
-                self.sessions[i] = session;
-            }
-        } else {
-            self.sessions.push(session);
-            let last = self.sessions.len() - 1;
-            self.session_selected = Some(last);
-            self.sf_editing = Some(last);
+            // Out-of-range editors still drop the write. A slot that no longer
+            // holds this ID is a different session and must not be replaced.
+            let _ =
+                sessions::replace_session_instance(&mut self.sessions, i, &existing_id, session);
+            return;
         }
-        let _ = sessions::save(&self.sessions);
+        let index = sessions::insert_session(&mut self.sessions, session);
+        self.session_selected = Some(index);
+        self.sf_editing = Some(index);
     }
 
     // ── Start screen ──────────────────────────────────────────────────────────
@@ -1117,7 +1179,7 @@ impl VncApp {
 
         if let Some(i) = connect_idx {
             if let Some(s) = self.sessions.get(i).cloned() {
-                Self::open_session_window(&s);
+                Self::open_session_window(&self.sessions, &s);
             }
         }
     }

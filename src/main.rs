@@ -61,12 +61,74 @@ struct Args {
     user: Option<String>,
 
     /// Open a saved session by name, in this window.
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     session: Option<String>,
 
     /// Internal selector for opening one saved session in a new window.
-    #[arg(long, hide = true, conflicts_with = "session")]
+    /// The name and account must still match that row.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with = "session",
+        requires_all = ["session_name", "session_host", "session_port"]
+    )]
     session_id: Option<String>,
+
+    /// Saved name of the row the parent selected.
+    #[arg(long, hide = true, allow_hyphen_values = true)]
+    session_name: Option<String>,
+
+    /// Host of the row a parent window selected.
+    #[arg(long, hide = true, allow_hyphen_values = true)]
+    session_host: Option<String>,
+
+    /// Port of the row a parent window selected.
+    #[arg(long, hide = true)]
+    session_port: Option<u16>,
+
+    /// VNC username of the row a parent window selected. Absent means none.
+    #[arg(long, hide = true, allow_hyphen_values = true)]
+    session_username: Option<String>,
+
+    /// The parent row had no unique ID. Do not store a password after auth.
+    #[arg(long, hide = true, default_value_t = false)]
+    no_session_writeback: bool,
+
+    /// The parent row had an empty legacy ID. The loaded row must still have none.
+    #[arg(long, hide = true, default_value_t = false)]
+    expect_empty_id: bool,
+}
+
+fn launch_account(args: &Args) -> Result<sessions::LaunchAccount> {
+    Ok(sessions::LaunchAccount {
+        host: args
+            .session_host
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--session-host is required"))?,
+        port: args
+            .session_port
+            .ok_or_else(|| anyhow::anyhow!("--session-port is required"))?,
+        username: args.session_username.clone(),
+    })
+}
+
+fn saved_launch(args: &Args) -> Result<Option<sessions::SavedLaunch>> {
+    if args.session_id.is_some() || args.session.is_some() {
+        let account = if args.session_host.is_some() || args.session_id.is_some() {
+            Some(launch_account(args)?)
+        } else {
+            None
+        };
+        return Ok(Some(sessions::SavedLaunch {
+            id: args.session_id.clone(),
+            key: args.session.clone(),
+            expected_name: args.session_name.clone(),
+            account,
+            no_writeback: args.no_session_writeback,
+            expect_empty_id: args.expect_empty_id,
+        }));
+    }
+    Ok(None)
 }
 
 fn main() -> Result<()> {
@@ -114,14 +176,12 @@ fn main() -> Result<()> {
     // reuse saved credentials only when host:port and the optional username
     // select a single saved session.
     let saved_sessions = sessions::load();
-    let selected_session = if let Some(id) = args.session_id.as_deref() {
-        Some(sessions::find_by_id(&saved_sessions, id)?)
-    } else if let Some(name) = args.session.as_deref() {
-        Some(sessions::find_named(&saved_sessions, name)?)
-    } else {
-        None
-    };
-    let initial_connection = if let Some(saved) = selected_session {
+    let launched = saved_launch(&args)?;
+    let selected_session = launched
+        .as_ref()
+        .map(|launch| sessions::open_saved_launch(&saved_sessions, launch))
+        .transpose()?;
+    let initial_connection = if let Some((saved, identity)) = selected_session {
         Some(connection::ConnectionParams {
             host: saved.host.clone(),
             port: saved.port,
@@ -130,7 +190,7 @@ fn main() -> Result<()> {
                 .password
                 .clone()
                 .or_else(|| (!saved.password.is_empty()).then(|| saved.password.clone())),
-            source_session: Some(saved.identity()),
+            source_session: Some(identity),
         })
     } else {
         args.host.clone().map(|host| {
@@ -150,7 +210,7 @@ fn main() -> Result<()> {
                 port: args.port,
                 username,
                 password,
-                source_session: saved.map(|s| s.identity()),
+                source_session: saved.map(|session| session.identity(&saved_sessions)),
             }
         })
     };
@@ -365,16 +425,129 @@ mod cli_tests {
     }
 
     #[test]
-    fn session_id_selector_is_hidden_and_exclusive_with_session_name() {
-        let args = Args::try_parse_from(["ironvnc", "--session-id", "bob-id"]).unwrap();
+    fn session_id_selector_is_hidden_and_requires_name_and_account() {
+        assert!(Args::try_parse_from(["ironvnc", "--session-id", "bob-id"]).is_err());
+        let args = Args::try_parse_from([
+            "ironvnc",
+            "--session-id",
+            "bob-id",
+            "--session-name",
+            "Bob",
+            "--session-host",
+            "desktop.example",
+            "--session-port",
+            "5900",
+            "--session-username",
+            "bob",
+        ])
+        .unwrap();
         assert_eq!(args.session_id.as_deref(), Some("bob-id"));
-        assert!(
-            Args::try_parse_from(["ironvnc", "--session-id", "bob-id", "--session", "Bob",])
-                .is_err()
-        );
+        assert_eq!(args.session_name.as_deref(), Some("Bob"));
+        assert_eq!(args.session_host.as_deref(), Some("desktop.example"));
+        assert_eq!(args.session_port, Some(5900));
+        assert_eq!(args.session_username.as_deref(), Some("bob"));
+        assert!(Args::try_parse_from([
+            "ironvnc",
+            "--session-id",
+            "bob-id",
+            "--session",
+            "Bob",
+            "--session-name",
+            "Bob",
+            "--session-host",
+            "desktop.example",
+            "--session-port",
+            "5900",
+        ])
+        .is_err());
         let help = Args::try_parse_from(["ironvnc", "--help"])
             .unwrap_err()
             .to_string();
         assert!(!help.contains("--session-id"));
+        assert!(!help.contains("--session-name"));
+        assert!(!help.contains("--no-session-writeback"));
+        assert!(!help.contains("--expect-empty-id"));
+    }
+
+    #[test]
+    fn hyphenated_session_name_is_a_value_not_a_flag() {
+        let args = Args::try_parse_from(["ironvnc", "--session", "-hidden-name"]).unwrap();
+        assert_eq!(args.session.as_deref(), Some("-hidden-name"));
+        let named = Args::try_parse_from([
+            "ironvnc",
+            "--session",
+            "desktop.example",
+            "--session-name",
+            "-A",
+            "--session-host",
+            "-desktop",
+            "--session-username",
+            "-alice",
+        ])
+        .unwrap();
+        assert_eq!(named.session_name.as_deref(), Some("-A"));
+        assert_eq!(named.session_host.as_deref(), Some("-desktop"));
+        assert_eq!(named.session_username.as_deref(), Some("-alice"));
+    }
+
+    #[test]
+    fn shared_id_launch_args_keep_writeback_off_after_recreate() {
+        let first = sessions::Session {
+            id: "shared-id".into(),
+            name: "A".into(),
+            host: "desktop.example".into(),
+            port: 5900,
+            username: Some("shared-user".into()),
+            password: "old secret".into(),
+            ssh_user: String::new(),
+        };
+        let mut second = first.clone();
+        second.name = "B".into();
+        second.password = "other secret".into();
+        let argv = sessions::session_window_args(&[first.clone(), second], &first).unwrap();
+        let mut cli = vec!["ironvnc".to_string()];
+        cli.extend(argv);
+        let args = Args::try_parse_from(&cli).unwrap();
+        assert!(args.no_session_writeback);
+        assert_eq!(args.session_name.as_deref(), Some("A"));
+        let launch = saved_launch(&args).unwrap().unwrap();
+        let mut recreated = first;
+        recreated.id.clear();
+        let mut loaded = Vec::new();
+        sessions::insert_session(&mut loaded, recreated);
+        let (_opened, identity) = sessions::open_saved_launch(&loaded, &launch).unwrap();
+        let before = loaded.clone();
+        assert!(!sessions::remember_connection(
+            &mut loaded,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "typed password",
+            Some(&identity),
+        ));
+        assert_eq!(loaded, before);
+    }
+
+    #[test]
+    fn empty_id_launch_args_reject_a_recreated_row() {
+        let legacy = sessions::Session {
+            id: String::new(),
+            name: "A".into(),
+            host: "desktop.example".into(),
+            port: 5900,
+            username: Some("alice".into()),
+            password: "old secret".into(),
+            ssh_user: String::new(),
+        };
+        let argv = sessions::session_window_args(std::slice::from_ref(&legacy), &legacy).unwrap();
+        let mut cli = vec!["ironvnc".to_string()];
+        cli.extend(argv);
+        let args = Args::try_parse_from(&cli).unwrap();
+        assert!(args.expect_empty_id);
+        let launch = saved_launch(&args).unwrap().unwrap();
+        let mut loaded = Vec::new();
+        sessions::insert_session(&mut loaded, legacy);
+        assert!(sessions::open_saved_launch(&loaded, &launch).is_err());
+        assert_eq!(loaded[0].password, "old secret");
     }
 }
