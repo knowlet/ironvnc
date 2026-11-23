@@ -130,7 +130,7 @@ fn main() -> Result<()> {
                 .password
                 .clone()
                 .or_else(|| (!saved.password.is_empty()).then(|| saved.password.clone())),
-            source_session: Some(saved.identity()),
+            source_session: Some(saved.identity(&saved_sessions)),
         })
     } else {
         args.host.clone().map(|host| {
@@ -150,7 +150,7 @@ fn main() -> Result<()> {
                 port: args.port,
                 username,
                 password,
-                source_session: saved.map(|s| s.identity()),
+                source_session: saved.map(|session| session.identity(&saved_sessions)),
             }
         })
     };

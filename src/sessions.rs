@@ -19,9 +19,21 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn identity(&self) -> SessionIdentity {
+    /// Identity of this row for an in-flight connection.
+    ///
+    /// A non-empty ID is that identity only when it appears once in `sessions`.
+    /// A shared ID is not a row: saving one copy assigns it a new ID and leaves
+    /// the old ID on the other row. Adopting the shared ID here would let a
+    /// later password update follow that leftover ID onto the sibling. Shared
+    /// and legacy empty IDs bind by name and account instead.
+    pub fn identity(&self, sessions: &[Session]) -> SessionIdentity {
+        let id_identifies_row = !self.id.is_empty() && !id_is_duplicated(sessions, &self.id);
         SessionIdentity {
-            id: self.id.clone(),
+            id: if id_identifies_row {
+                self.id.clone()
+            } else {
+                String::new()
+            },
             name: self.name.clone(),
             host: self.host.clone(),
             port: self.port,
@@ -70,12 +82,16 @@ impl SessionIdentity {
         if !self.id.is_empty() {
             // A label can change while connecting. An endpoint or account
             // edit invalidates this in-flight connection's credential snapshot.
+            // `id` is set only when it identified exactly one row at bind time.
             self.id == session.id
                 && self.host == session.host
                 && self.port == session.port
                 && self.username == session.username
                 && self.password == session.password
         } else {
+            // Legacy rows, and rows whose ID was shared, have no row id.
+            // The name and account are the row, so a sibling that kept the
+            // shared ID cannot receive this connection's password.
             self.name == session.name
                 && self.host == session.host
                 && self.port == session.port
@@ -131,6 +147,7 @@ pub fn insert_session(sessions: &mut Vec<Session>, mut session: Session) -> usiz
 /// Write `session` into `index` only when that slot still has `expected_id`.
 /// A different row that happens to share the ID is left untouched. If this
 /// slot's ID is already used by another row, the stored copy gets a new ID.
+/// The previous ID remains on that other row and is not this row's identity.
 pub fn replace_session_instance(
     sessions: &mut [Session],
     index: usize,
@@ -323,6 +340,12 @@ pub fn load() -> Vec<Session> {
     Vec::new()
 }
 
+/// Replace the on-disk session list with `sessions`.
+///
+/// The file is one snapshot of the whole list. Two windows can each load,
+/// edit, and save; the later save replaces the earlier snapshot, including
+/// rows that window did not change. That whole-list race is a known limit
+/// and is out of scope for the per-row identity checks.
 pub fn save(sessions: &[Session]) -> Result<()> {
     let store = Store {
         sessions: sessions.to_vec(),
@@ -375,7 +398,7 @@ mod tests {
             account("Bob", "bob", "old bob"),
         ];
         let alice = sessions[0].clone();
-        let source = find_named(&sessions, "Bob").unwrap().identity();
+        let source = find_named(&sessions, "Bob").unwrap().identity(&sessions);
         assert!(remember_connection(
             &mut sessions,
             "desktop.example",
@@ -397,7 +420,7 @@ mod tests {
     fn persistent_identity_survives_session_label_edits() {
         let mut bob = account("Bob", "bob", "old");
         bob.id = "stable-bob-id".to_string();
-        let source = bob.identity();
+        let source = bob.identity(std::slice::from_ref(&bob));
         bob.name = "Work login".to_string();
         let mut sessions = vec![account("Alice", "alice", "alice secret"), bob];
         assert!(remember_connection(
@@ -419,7 +442,7 @@ mod tests {
         for edit in ["host", "port", "username", "password"] {
             let mut saved = account("Work", "alice", "old");
             saved.id = "same-id".into();
-            let source = saved.identity();
+            let source = saved.identity(std::slice::from_ref(&saved));
             match edit {
                 "host" => saved.host = "new-host.example".into(),
                 "port" => saved.port = 5901,
@@ -479,7 +502,7 @@ mod tests {
     #[test]
     fn missing_or_ambiguous_source_never_updates_another_account() {
         let bob = account("Bob", "bob", "old");
-        let source = bob.identity();
+        let source = bob.identity(std::slice::from_ref(&bob));
         let mut sessions = vec![account("Alice", "alice", "alice secret")];
         let original = sessions.clone();
         assert!(!remember_connection(
@@ -570,6 +593,70 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].name, "Bob edited");
         assert_eq!(sessions[0].password, "new bob");
+    }
+
+    fn shared_account(name: &str) -> Session {
+        let mut session = account(name, "shared-user", "old secret");
+        session.id = "shared-id".into();
+        session
+    }
+
+    /// `--session A` while two rows share an ID, then one row is saved.
+    /// Saving gives that row a new ID and leaves `shared-id` on the sibling.
+    fn session_a_after_shared_id_save(
+        edit_saved_password: bool,
+    ) -> (Vec<Session>, SessionIdentity) {
+        let first = shared_account("A");
+        let second = shared_account("B");
+        let mut sessions = vec![first.clone(), second];
+        let source = find_named(&sessions, "A").unwrap().identity(&sessions);
+        let mut saved = first;
+        if edit_saved_password {
+            saved.password = "form password".into();
+        }
+        assert!(replace_session_instance(
+            &mut sessions,
+            0,
+            "shared-id",
+            saved
+        ));
+        assert_ne!(sessions[0].id, "shared-id");
+        assert_eq!(sessions[1].id, "shared-id");
+        (sessions, source)
+    }
+
+    #[test]
+    fn shared_id_save_writes_session_password_only_to_the_named_row() {
+        let (mut sessions, source) = session_a_after_shared_id_save(false);
+        assert!(remember_connection(
+            &mut sessions,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "password from --session A",
+            Some(&source),
+        ));
+        assert_eq!(sessions[0].name, "A");
+        assert_eq!(sessions[0].password, "password from --session A");
+        assert_eq!(sessions[1].name, "B");
+        assert_eq!(sessions[1].password, "old secret");
+        assert_eq!(sessions[1].id, "shared-id");
+    }
+
+    #[test]
+    fn shared_id_save_does_not_bind_session_password_to_the_sibling() {
+        let (mut sessions, source) = session_a_after_shared_id_save(true);
+        let sibling = sessions[1].clone();
+        assert!(!remember_connection(
+            &mut sessions,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "password from --session A",
+            Some(&source),
+        ));
+        assert_eq!(sessions[0].password, "form password");
+        assert_eq!(sessions[1], sibling);
     }
 
     fn insert_locked(sessions: &std::sync::Mutex<Vec<Session>>, session: Session) -> usize {
