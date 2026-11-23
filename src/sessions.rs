@@ -22,23 +22,24 @@ impl Session {
     /// Identity of this row for an in-flight connection.
     ///
     /// A non-empty ID is that identity only when it appears once in `sessions`.
-    /// A shared ID is not a row: saving one copy assigns it a new ID and leaves
-    /// the old ID on the other row. Adopting the shared ID here would let a
-    /// later password update follow that leftover ID onto the sibling. Shared
-    /// and legacy empty IDs bind by name and account instead.
+    /// A shared ID is not a row. Credential writeback is skipped for it: saving
+    /// one copy assigns a new ID, and a recreated row with the same name and
+    /// account would otherwise take the password. Legacy empty IDs still bind
+    /// by name and account.
     pub fn identity(&self, sessions: &[Session]) -> SessionIdentity {
-        let id_identifies_row = !self.id.is_empty() && !id_is_duplicated(sessions, &self.id);
+        let shared_id = id_is_duplicated(sessions, &self.id);
         SessionIdentity {
-            id: if id_identifies_row {
-                self.id.clone()
-            } else {
+            id: if self.id.is_empty() || shared_id {
                 String::new()
+            } else {
+                self.id.clone()
             },
             name: self.name.clone(),
             host: self.host.clone(),
             port: self.port,
             username: self.username.clone(),
             password: self.password.clone(),
+            shared_id,
         }
     }
 
@@ -61,6 +62,8 @@ pub struct SessionIdentity {
     port: u16,
     username: Option<String>,
     password: String,
+    /// The source row's ID was shared. Name and account are not a substitute.
+    shared_id: bool,
 }
 
 impl std::fmt::Debug for SessionIdentity {
@@ -73,12 +76,18 @@ impl std::fmt::Debug for SessionIdentity {
             .field("port", &self.port)
             .field("username", &self.username)
             .field("password", &"[redacted]")
+            .field("shared_id", &self.shared_id)
             .finish()
     }
 }
 
 impl SessionIdentity {
     fn matches(&self, session: &Session) -> bool {
+        // A shared ID identifies no row. Matching the name and account would
+        // write this connection's password into a recreated identical row.
+        if self.shared_id {
+            return false;
+        }
         if !self.id.is_empty() {
             // A label can change while connecting. An endpoint or account
             // edit invalidates this in-flight connection's credential snapshot.
@@ -89,9 +98,6 @@ impl SessionIdentity {
                 && self.username == session.username
                 && self.password == session.password
         } else {
-            // Legacy rows, and rows whose ID was shared, have no row id.
-            // The name and account are the row, so a sibling that kept the
-            // shared ID cannot receive this connection's password.
             self.name == session.name
                 && self.host == session.host
                 && self.port == session.port
@@ -99,6 +105,104 @@ impl SessionIdentity {
                 && self.password == session.password
         }
     }
+}
+
+/// Host, port, and VNC username of the row a parent window asked to open.
+/// The password stays off the command line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LaunchAccount {
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+}
+
+fn account_matches(session: &Session, account: &LaunchAccount) -> bool {
+    session.host == account.host
+        && session.port == account.port
+        && session.username == account.username
+}
+
+/// Resolve `--session-id` only when that ID is one row and still has the
+/// name and account the parent window selected. A stale shared ID that now
+/// belongs only to a sibling does not match.
+pub fn find_launched_session<'a>(
+    sessions: &'a [Session],
+    id: &str,
+    name: &str,
+    account: &LaunchAccount,
+) -> Result<&'a Session> {
+    let session = find_by_id(sessions, id)?;
+    anyhow::ensure!(
+        session.name == name && account_matches(session, account),
+        "Saved session ID does not match the requested name and account"
+    );
+    Ok(session)
+}
+
+/// Resolve `--session` and, when the parent supplied an account, require it.
+/// An ambiguous name or host is an error.
+pub fn find_named_account<'a>(
+    sessions: &'a [Session],
+    key: &str,
+    account: Option<&LaunchAccount>,
+) -> Result<&'a Session> {
+    let session = find_named(sessions, key)?;
+    if let Some(account) = account {
+        anyhow::ensure!(
+            account_matches(session, account),
+            "Saved session does not match the requested account"
+        );
+    }
+    Ok(session)
+}
+
+/// Child-process arguments that open `session`.
+///
+/// A shared ID is not passed: after another window saves one copy, that ID
+/// belongs only to the other row. A name or host that matches more than one
+/// row, or a different account, does not launch.
+pub fn session_window_args(sessions: &[Session], session: &Session) -> Option<Vec<String>> {
+    let account_args = launch_account_args(session);
+    if !session.id.is_empty() && !id_is_duplicated(sessions, &session.id) {
+        let mut args = vec![
+            "--session-id".to_string(),
+            session.id.clone(),
+            "--session-name".to_string(),
+            session.name.clone(),
+        ];
+        args.extend(account_args);
+        return Some(args);
+    }
+    let key = if session.name.is_empty() {
+        session.host.as_str()
+    } else {
+        session.name.as_str()
+    };
+    let found = find_named(sessions, key).ok()?;
+    if found.name != session.name
+        || found.host != session.host
+        || found.port != session.port
+        || found.username != session.username
+    {
+        return None;
+    }
+    let mut args = vec!["--session".to_string(), key.to_string()];
+    args.extend(account_args);
+    Some(args)
+}
+
+fn launch_account_args(session: &Session) -> Vec<String> {
+    let mut args = vec![
+        "--session-host".to_string(),
+        session.host.clone(),
+        "--session-port".to_string(),
+        session.port.to_string(),
+    ];
+    if let Some(username) = &session.username {
+        args.push("--session-username".to_string());
+        args.push(username.clone());
+    }
+    args
 }
 
 pub fn new_id() -> String {
@@ -626,27 +730,9 @@ mod tests {
     }
 
     #[test]
-    fn shared_id_save_writes_session_password_only_to_the_named_row() {
+    fn shared_id_save_does_not_write_password_into_the_reidentified_row() {
         let (mut sessions, source) = session_a_after_shared_id_save(false);
-        assert!(remember_connection(
-            &mut sessions,
-            "desktop.example",
-            5900,
-            Some("shared-user".into()),
-            "password from --session A",
-            Some(&source),
-        ));
-        assert_eq!(sessions[0].name, "A");
-        assert_eq!(sessions[0].password, "password from --session A");
-        assert_eq!(sessions[1].name, "B");
-        assert_eq!(sessions[1].password, "old secret");
-        assert_eq!(sessions[1].id, "shared-id");
-    }
-
-    #[test]
-    fn shared_id_save_does_not_bind_session_password_to_the_sibling() {
-        let (mut sessions, source) = session_a_after_shared_id_save(true);
-        let sibling = sessions[1].clone();
+        let before = sessions.clone();
         assert!(!remember_connection(
             &mut sessions,
             "desktop.example",
@@ -655,8 +741,122 @@ mod tests {
             "password from --session A",
             Some(&source),
         ));
-        assert_eq!(sessions[0].password, "form password");
-        assert_eq!(sessions[1], sibling);
+        assert_eq!(sessions, before);
+    }
+
+    #[test]
+    fn shared_id_save_does_not_bind_session_password_to_the_sibling() {
+        let (mut sessions, source) = session_a_after_shared_id_save(true);
+        let before = sessions.clone();
+        assert!(!remember_connection(
+            &mut sessions,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "password from --session A",
+            Some(&source),
+        ));
+        assert_eq!(sessions, before);
+    }
+
+    #[test]
+    fn shared_id_does_not_write_password_into_a_recreated_row() {
+        let first = shared_account("A");
+        let second = shared_account("B");
+        let mut sessions = vec![first.clone(), second];
+        let source = find_named(&sessions, "A").unwrap().identity(&sessions);
+        assert!(remove_indexed_instance(&mut sessions, 0, &first));
+        let mut recreated = first;
+        recreated.id.clear();
+        insert_session(&mut sessions, recreated);
+        let before = sessions.clone();
+        assert!(!remember_connection(
+            &mut sessions,
+            "desktop.example",
+            5900,
+            Some("shared-user".into()),
+            "password from --session A",
+            Some(&source),
+        ));
+        assert_eq!(sessions, before);
+        assert_eq!(sessions[0].password, "old secret");
+    }
+
+    #[test]
+    fn stale_shared_id_is_not_a_window_argument() {
+        let first = shared_account("A");
+        let second = shared_account("B");
+        let sessions = vec![first.clone(), second];
+        let args = session_window_args(&sessions, &first).unwrap();
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "--session-id" || arg == "shared-id"));
+        assert_eq!(
+            &args[..2],
+            ["--session".to_string(), "A".to_string()].as_slice()
+        );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-host", "desktop.example"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-port", "5900"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-username", "shared-user"]));
+    }
+
+    #[test]
+    fn ambiguous_shared_id_does_not_launch_a_window() {
+        let first = shared_account("A");
+        let mut twin = first.clone();
+        twin.password = "other secret".into();
+        assert!(session_window_args(&[first.clone(), twin], &first).is_none());
+    }
+
+    #[test]
+    fn unique_id_launch_carries_name_and_account() {
+        let mut session = account("A", "alice", "secret");
+        session.id = "only-a".into();
+        let args = session_window_args(std::slice::from_ref(&session), &session).unwrap();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-id", "only-a"]));
+        assert!(args.windows(2).any(|pair| pair == ["--session-name", "A"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-host", "desktop.example"]));
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--session-username", "alice"]));
+    }
+
+    #[test]
+    fn launched_id_must_still_match_name_and_account() {
+        let mut saved_a = shared_account("A");
+        saved_a.id = "new-id".into();
+        let saved_b = shared_account("B");
+        let saved = vec![saved_a.clone(), saved_b];
+        let account = LaunchAccount {
+            host: saved_a.host.clone(),
+            port: saved_a.port,
+            username: saved_a.username.clone(),
+        };
+        assert!(find_launched_session(&saved, "shared-id", "A", &account).is_err());
+        assert_eq!(
+            find_launched_session(&saved, "new-id", "A", &account)
+                .unwrap()
+                .name,
+            "A"
+        );
+        let named = find_named_account(&saved, "A", Some(&account)).unwrap();
+        assert_eq!(named.id, "new-id");
+        let other_account = LaunchAccount {
+            host: "other.example".into(),
+            port: 5901,
+            username: Some("other".into()),
+        };
+        assert!(find_named_account(&saved, "A", Some(&other_account)).is_err());
     }
 
     fn insert_locked(sessions: &std::sync::Mutex<Vec<Session>>, session: Session) -> usize {

@@ -204,18 +204,14 @@ impl VncApp {
 
     /// Open a saved session in its own window. Passing the session key (not the
     /// password) keeps credentials off the command line — the child loads the
-    /// password from the saved sessions file.
-    fn open_session_window(session: &Session) {
-        if !session.id.is_empty() {
-            Self::spawn_window(&["--session-id", &session.id]);
+    /// password from the saved sessions file. A shared ID is not sent, and an
+    /// ambiguous name or account does not launch.
+    fn open_session_window(sessions: &[Session], session: &Session) {
+        let Some(args) = sessions::session_window_args(sessions, session) else {
             return;
-        }
-        let key = if session.name.is_empty() {
-            &session.host
-        } else {
-            &session.name
         };
-        Self::spawn_window(&["--session", key]);
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        Self::spawn_window(&borrowed);
     }
 
     /// Open an ad-hoc host:port connection in its own window. The child loads a
@@ -1042,7 +1038,7 @@ impl VncApp {
         if let Some(i) = connect_idx {
             if let Some(s) = self.sessions.get(i).cloned() {
                 // Open each saved session in its own window.
-                Self::open_session_window(&s);
+                Self::open_session_window(&self.sessions, &s);
             }
         }
     }
@@ -1183,7 +1179,7 @@ impl VncApp {
 
         if let Some(i) = connect_idx {
             if let Some(s) = self.sessions.get(i).cloned() {
-                Self::open_session_window(&s);
+                Self::open_session_window(&self.sessions, &s);
             }
         }
     }

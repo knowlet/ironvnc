@@ -65,8 +65,43 @@ struct Args {
     session: Option<String>,
 
     /// Internal selector for opening one saved session in a new window.
-    #[arg(long, hide = true, conflicts_with = "session")]
+    /// The name and account must still match that row.
+    #[arg(
+        long,
+        hide = true,
+        conflicts_with = "session",
+        requires_all = ["session_name", "session_host", "session_port"]
+    )]
     session_id: Option<String>,
+
+    /// Name of the row selected by `--session-id`.
+    #[arg(long, hide = true, requires = "session_id")]
+    session_name: Option<String>,
+
+    /// Host of the row a parent window selected.
+    #[arg(long, hide = true)]
+    session_host: Option<String>,
+
+    /// Port of the row a parent window selected.
+    #[arg(long, hide = true)]
+    session_port: Option<u16>,
+
+    /// VNC username of the row a parent window selected. Absent means none.
+    #[arg(long, hide = true)]
+    session_username: Option<String>,
+}
+
+fn launch_account(args: &Args) -> Result<sessions::LaunchAccount> {
+    Ok(sessions::LaunchAccount {
+        host: args
+            .session_host
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("--session-host is required"))?,
+        port: args
+            .session_port
+            .ok_or_else(|| anyhow::anyhow!("--session-port is required"))?,
+        username: args.session_username.clone(),
+    })
 }
 
 fn main() -> Result<()> {
@@ -115,9 +150,25 @@ fn main() -> Result<()> {
     // select a single saved session.
     let saved_sessions = sessions::load();
     let selected_session = if let Some(id) = args.session_id.as_deref() {
-        Some(sessions::find_by_id(&saved_sessions, id)?)
+        let name = args
+            .session_name
+            .as_deref()
+            .ok_or_else(|| anyhow::anyhow!("--session-id requires --session-name"))?;
+        let account = launch_account(&args)?;
+        Some(sessions::find_launched_session(
+            &saved_sessions,
+            id,
+            name,
+            &account,
+        )?)
     } else if let Some(name) = args.session.as_deref() {
-        Some(sessions::find_named(&saved_sessions, name)?)
+        let account = args.session_host.as_ref().map(|_| launch_account(&args));
+        let account = account.transpose()?;
+        Some(sessions::find_named_account(
+            &saved_sessions,
+            name,
+            account.as_ref(),
+        )?)
     } else {
         None
     };
@@ -365,16 +416,45 @@ mod cli_tests {
     }
 
     #[test]
-    fn session_id_selector_is_hidden_and_exclusive_with_session_name() {
-        let args = Args::try_parse_from(["ironvnc", "--session-id", "bob-id"]).unwrap();
+    fn session_id_selector_is_hidden_and_requires_name_and_account() {
+        assert!(Args::try_parse_from(["ironvnc", "--session-id", "bob-id"]).is_err());
+        let args = Args::try_parse_from([
+            "ironvnc",
+            "--session-id",
+            "bob-id",
+            "--session-name",
+            "Bob",
+            "--session-host",
+            "desktop.example",
+            "--session-port",
+            "5900",
+            "--session-username",
+            "bob",
+        ])
+        .unwrap();
         assert_eq!(args.session_id.as_deref(), Some("bob-id"));
-        assert!(
-            Args::try_parse_from(["ironvnc", "--session-id", "bob-id", "--session", "Bob",])
-                .is_err()
-        );
+        assert_eq!(args.session_name.as_deref(), Some("Bob"));
+        assert_eq!(args.session_host.as_deref(), Some("desktop.example"));
+        assert_eq!(args.session_port, Some(5900));
+        assert_eq!(args.session_username.as_deref(), Some("bob"));
+        assert!(Args::try_parse_from([
+            "ironvnc",
+            "--session-id",
+            "bob-id",
+            "--session",
+            "Bob",
+            "--session-name",
+            "Bob",
+            "--session-host",
+            "desktop.example",
+            "--session-port",
+            "5900",
+        ])
+        .is_err());
         let help = Args::try_parse_from(["ironvnc", "--help"])
             .unwrap_err()
             .to_string();
         assert!(!help.contains("--session-id"));
+        assert!(!help.contains("--session-name"));
     }
 }
